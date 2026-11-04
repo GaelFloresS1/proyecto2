@@ -1,0 +1,62 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Fraunces", serif;
+  --font-sans: "Outfit", system-ui, sans-serif;
+  --color-cocoa: #3d2a24;
+  --color-cocoa-soft: #5a3f36;
+  --color-cream: #f7f1e8;
+  --color-cream-dark: #efe4d4;
+  --color-berry: #c45c7a;
+  --color-berry-dark: #a34462;
+  --color-macaron: #e8b4b8;
+  --color-gold: #c4a574;
+  --color-sage: #6f8f74;
+  --color-ink: #2a1f1c;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  background: var(--color-cream);
+  color: var(--color-ink);
+}
+
+.font-display {
+  font-family: var(--font-display);
+}
+
+.bg-bakery {
+  background:
+    radial-gradient(circle at 12% 18%, rgba(232, 180, 184, 0.45), transparent 28%),
+    radial-gradient(circle at 88% 8%, rgba(196, 165, 116, 0.28), transparent 26%),
+    radial-gradient(circle at 80% 90%, rgba(196, 92, 122, 0.18), transparent 30%),
+    linear-gradient(165deg, #fbf6ef 0%, #f3e7d8 45%, #ead9c8 100%);
+}
+
+.bg-dots {
+  background-image: radial-gradient(rgba(61, 42, 36, 0.08) 1px, transparent 1px);
+  background-size: 18px 18px;
+}
+
+input,
+select,
+textarea {
+  font-family: inherit;
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: #d4c3b3;
+  border-radius: 99px;
+}
