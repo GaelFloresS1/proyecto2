@@ -31,6 +31,81 @@ export const POSITIONS = [
 const listeners = new Set()
 let state = null
 
+// Comunicación con el backend. Vite redirige /api hacia Express.
+async function authRequest(path, options = {}) {
+  let response
+
+  try {
+    response = await fetch(`/api/auth${path}`, {
+      credentials: 'include',
+      ...options,
+      headers: {
+        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+        ...options.headers,
+      },
+    })
+  } catch {
+    return {
+      ok: false,
+      message: 'No se pudo conectar con el servidor. Verifica que el backend esté iniciado.',
+    }
+  }
+
+  const data = await response.json().catch(() => ({}))
+
+  if (!response.ok || data.ok === false) {
+    return {
+      ok: false,
+      message: data.message || `Error de autenticación (${response.status}).`,
+    }
+  }
+
+  return { ok: true, ...data }
+}
+
+function mapEmployeeToUser(employee) {
+  return {
+    id: employee.id,
+    username: employee.username,
+    name: employee.name,
+    role: employee.role,
+    position: employee.position,
+
+    // Estos datos todavía no vienen en publicEmployee del backend.
+    salary: 0,
+    shiftId: null,
+    failedAttempts: 0,
+    locked: false,
+    active: true,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+function applyAuthenticatedEmployee(employee) {
+  const user = mapEmployeeToUser(employee)
+
+  const existingIndex = state.users.findIndex(
+    (item) =>
+      String(item.id) === String(user.id) ||
+      item.username?.toLowerCase() === user.username?.toLowerCase(),
+  )
+
+  if (existingIndex >= 0) {
+    state.users.splice(existingIndex, 1)
+  }
+
+  state.users.push(user)
+  state.sessionUserId = user.id
+
+  commit({
+    ...state,
+    users: [...state.users],
+  })
+
+  return user
+}
+
 export function getState() {
   return state
 }
@@ -53,13 +128,17 @@ export function patch(updater) {
 export async function hashPassword(password) {
   const data = new TextEncoder().encode(password)
   const buffer = await crypto.subtle.digest('SHA-256', data)
-  return [...new Uint8Array(buffer)].map((b) => b.toString(16).padStart(2, '0')).join('')
+
+  return [...new Uint8Array(buffer)]
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
 }
 
 export function localISO(date = new Date()) {
   const y = date.getFullYear()
   const m = String(date.getMonth() + 1).padStart(2, '0')
   const d = String(date.getDate()).padStart(2, '0')
+
   return `${y}-${m}-${d}`
 }
 
@@ -78,7 +157,9 @@ export function minutesOf(hhmm) {
 
 export function hoursBetween(startHm, endHm) {
   let diff = minutesOf(endHm) - minutesOf(startHm)
+
   if (diff < 0) diff += 24 * 60
+
   return Math.round((diff / 60) * 100) / 100
 }
 
@@ -110,6 +191,7 @@ async function createSeed() {
     salary: 22000,
     shiftId: 'shift_completo',
   })
+
   const rh = await seedUser({
     username: 'rh',
     password: 'Rh123456!',
@@ -119,6 +201,7 @@ async function createSeed() {
     salary: 18000,
     shiftId: 'shift_matutino',
   })
+
   const supervisor = await seedUser({
     username: 'supervisor',
     password: 'Super123!',
@@ -128,6 +211,7 @@ async function createSeed() {
     salary: 16000,
     shiftId: 'shift_matutino',
   })
+
   const barista = await seedUser({
     username: 'barista',
     password: 'Barista1!',
@@ -137,6 +221,7 @@ async function createSeed() {
     salary: 9800,
     shiftId: 'shift_matutino',
   })
+
   const cajero = await seedUser({
     username: 'cajero',
     password: 'Cajero12!',
@@ -146,6 +231,7 @@ async function createSeed() {
     salary: 10200,
     shiftId: 'shift_vespertino',
   })
+
   const capacitador = await seedUser({
     username: 'capacitador',
     password: 'Capacit1!',
@@ -155,6 +241,7 @@ async function createSeed() {
     salary: 14000,
     shiftId: 'shift_completo',
   })
+
   const baja = await seedUser({
     username: 'martin',
     password: 'Martin12!',
@@ -167,9 +254,30 @@ async function createSeed() {
   })
 
   const shifts = [
-    { id: 'shift_matutino', name: 'Matutino', start: '07:00', end: '15:00', breakMinutes: 30, weeklyDays: [1, 2, 3, 4, 5, 6] },
-    { id: 'shift_vespertino', name: 'Vespertino', start: '14:00', end: '22:00', breakMinutes: 30, weeklyDays: [1, 2, 3, 4, 5, 6] },
-    { id: 'shift_completo', name: 'Administrativo', start: '09:00', end: '18:00', breakMinutes: 60, weeklyDays: [1, 2, 3, 4, 5] },
+    {
+      id: 'shift_matutino',
+      name: 'Matutino',
+      start: '07:00',
+      end: '15:00',
+      breakMinutes: 30,
+      weeklyDays: [1, 2, 3, 4, 5, 6],
+    },
+    {
+      id: 'shift_vespertino',
+      name: 'Vespertino',
+      start: '14:00',
+      end: '22:00',
+      breakMinutes: 30,
+      weeklyDays: [1, 2, 3, 4, 5, 6],
+    },
+    {
+      id: 'shift_completo',
+      name: 'Administrativo',
+      start: '09:00',
+      end: '18:00',
+      breakMinutes: 60,
+      weeklyDays: [1, 2, 3, 4, 5],
+    },
   ]
 
   const holidays = [
@@ -261,7 +369,11 @@ async function createSeed() {
 }
 
 function attendance(userId, date, checkIn, checkOut, shift) {
-  const lateMinutes = Math.max(0, minutesOf(checkIn) - minutesOf(shift.start) - 10)
+  const lateMinutes = Math.max(
+    0,
+    minutesOf(checkIn) - minutesOf(shift.start) - 10,
+  )
+
   return {
     id: uid('att'),
     userId,
@@ -276,9 +388,9 @@ function attendance(userId, date, checkIn, checkOut, shift) {
     notes: '',
   }
 }
-
 export async function bootstrap() {
   const raw = localStorage.getItem(KEY)
+
   if (raw) {
     try {
       state = JSON.parse(raw)
@@ -290,7 +402,19 @@ export async function bootstrap() {
     state = await createSeed()
     localStorage.setItem(KEY, JSON.stringify(state))
   }
-  listeners.forEach((fn) => fn(state))
+
+  // La sesión válida proviene del backend, no de localStorage.
+  state.sessionUserId = null
+
+  const sessionResult = await authRequest('/me')
+
+  if (sessionResult.ok && sessionResult.employee) {
+    applyAuthenticatedEmployee(sessionResult.employee)
+  } else {
+    localStorage.setItem(KEY, JSON.stringify(state))
+    listeners.forEach((fn) => fn(state))
+  }
+
   return state
 }
 
@@ -301,7 +425,13 @@ export async function resetDemo() {
   listeners.forEach((fn) => fn(state))
 }
 
-function addAudit(draft, { userId, action, entity, previousValue, newValue }) {
+function addAudit(draft, {
+  userId,
+  action,
+  entity,
+  previousValue,
+  newValue,
+}) {
   draft.auditLog.unshift({
     id: uid('log'),
     userId,
@@ -329,59 +459,97 @@ export function holidayName(date) {
   return state.holidays.find((h) => h.date === date)?.name
 }
 
+// =====================================================
+// AUTENTICACIÓN CON EL BACKEND
+// =====================================================
+
 export async function login(username, password) {
-  const user = state.users.find((u) => u.username.toLowerCase() === username.trim().toLowerCase())
-  if (!user) {
-    return { ok: false, message: 'No existe una cuenta con ese usuario. Verifica el nombre o pide alta al administrador.' }
-  }
-  if (!user.active) {
-    return { ok: false, message: 'Esta cuenta está inactiva (baja lógica). Contacta a Recursos Humanos para reactivarla.' }
-  }
-  if (user.locked) {
-    return { ok: false, message: 'La cuenta está bloqueada por 5 intentos fallidos. Usa Recuperar contraseña o pide desbloqueo al administrador.' }
-  }
-  const hash = await hashPassword(password)
-  if (hash !== user.passwordHash) {
-    patch((draft) => {
-      const target = draft.users.find((u) => u.id === user.id)
-      target.failedAttempts += 1
-      if (target.failedAttempts >= 5) target.locked = true
-      return draft
-    })
-    const attempts = getUser(user.id).failedAttempts
-    if (getUser(user.id).locked) {
-      return { ok: false, message: 'Cuenta bloqueada tras 5 intentos. Recupera la contraseña o solicita desbloqueo.' }
-    }
-    return { ok: false, message: `Contraseña incorrecta. Te quedan ${5 - attempts} intento(s) antes del bloqueo.` }
-  }
-  patch((draft) => {
-    const target = draft.users.find((u) => u.id === user.id)
-    target.failedAttempts = 0
-    draft.sessionUserId = user.id
-    return draft
+  const result = await authRequest('/login', {
+    method: 'POST',
+    body: JSON.stringify({ username, password }),
   })
-  return { ok: true, user: getUser(user.id) }
+
+  if (!result.ok) {
+    return {
+      ok: false,
+      message: result.message,
+    }
+  }
+
+  if (!result.employee) {
+    return {
+      ok: false,
+      message: 'El servidor no devolvió los datos del empleado.',
+    }
+  }
+
+  const user = applyAuthenticatedEmployee(result.employee)
+
+  return {
+    ok: true,
+    user,
+  }
 }
 
-export function logout() {
-  patch((draft) => {
-    draft.sessionUserId = null
-    return draft
+export async function getCurrentUser() {
+  const result = await authRequest('/me')
+
+  if (!result.ok || !result.employee) {
+    if (state) {
+      state.sessionUserId = null
+      commit({ ...state })
+    }
+
+    return null
+  }
+
+  return applyAuthenticatedEmployee(result.employee)
+}
+
+export async function logout() {
+  // Se limpia el estado local aunque el servidor no responda.
+  if (state) {
+    state.sessionUserId = null
+    commit({ ...state })
+  }
+
+  await authRequest('/logout', {
+    method: 'POST',
   })
 }
+
+// =====================================================
+// RECUPERACIÓN SIMULADA DE CONTRASEÑA
+// Todavía no está conectada con MySQL.
+// =====================================================
 
 export async function startPasswordRecovery(username) {
-  const user = state.users.find((u) => u.username.toLowerCase() === username.trim().toLowerCase() && u.active)
+  const user = state.users.find(
+    (u) =>
+      u.username.toLowerCase() === username.trim().toLowerCase() &&
+      u.active,
+  )
+
   if (!user) {
-    return { ok: false, message: 'No encontramos un usuario activo con ese nombre. Revisa la captura o acude con el administrador.' }
+    return {
+      ok: false,
+      message: 'No encontramos un usuario activo con ese nombre. Revisa la captura o acude con el administrador.',
+    }
   }
-  const code = String(Math.floor(100000 + Math.random() * 900000))
+
+  const code = String(
+    Math.floor(100000 + Math.random() * 900000),
+  )
+
   patch((draft) => {
     const target = draft.users.find((u) => u.id === user.id)
+
     target.recoveryCode = code
     target.recoveryExpires = Date.now() + 15 * 60 * 1000
+
     return draft
   })
+
   return {
     ok: true,
     code,
@@ -389,28 +557,54 @@ export async function startPasswordRecovery(username) {
   }
 }
 
-export async function completePasswordRecovery({ username, code, password }) {
+export async function completePasswordRecovery({
+  username,
+  code,
+  password,
+}) {
   if (!password || password.length < 8) {
-    return { ok: false, message: 'La nueva contraseña debe tener al menos 8 caracteres.' }
+    return {
+      ok: false,
+      message: 'La nueva contraseña debe tener al menos 8 caracteres.',
+    }
   }
-  const user = state.users.find((u) => u.username.toLowerCase() === username.trim().toLowerCase())
+
+  const user = state.users.find(
+    (u) => u.username.toLowerCase() === username.trim().toLowerCase(),
+  )
+
   if (!user?.recoveryCode) {
-    return { ok: false, message: 'Primero solicita un código de recuperación para este usuario.' }
+    return {
+      ok: false,
+      message: 'Primero solicita un código de recuperación para este usuario.',
+    }
   }
+
   if (user.recoveryExpires < Date.now()) {
-    return { ok: false, message: 'El código caducó. Solicita uno nuevo.' }
+    return {
+      ok: false,
+      message: 'El código caducó. Solicita uno nuevo.',
+    }
   }
+
   if (user.recoveryCode !== code.trim()) {
-    return { ok: false, message: 'El código no coincide. Revisa el número de 6 dígitos mostrado en la simulación.' }
+    return {
+      ok: false,
+      message: 'El código no coincide. Revisa el número de 6 dígitos mostrado en la simulación.',
+    }
   }
+
   const passwordHash = await hashPassword(password)
+
   patch((draft) => {
     const target = draft.users.find((u) => u.id === user.id)
+
     target.passwordHash = passwordHash
     target.locked = false
     target.failedAttempts = 0
     target.recoveryCode = null
     target.recoveryExpires = null
+
     addAudit(draft, {
       userId: user.id,
       action: 'Recuperación de contraseña',
@@ -418,15 +612,21 @@ export async function completePasswordRecovery({ username, code, password }) {
       previousValue: 'bloqueado/olvidado',
       newValue: 'contraseña restablecida',
     })
+
     return draft
   })
-  return { ok: true, message: 'Contraseña actualizada. Ya puedes iniciar sesión.' }
+
+  return {
+    ok: true,
+    message: 'Contraseña actualizada. Ya puedes iniciar sesión.',
+  }
 }
 
 export function homePathFor(role) {
   if (role === ROLES.ADMIN) return '/admin/empleados'
   if (role === ROLES.RH) return '/rh/solicitudes'
   if (role === ROLES.SUPERVISOR) return '/rh/solicitudes'
+
   return '/empleado'
 }
 
@@ -434,21 +634,45 @@ export function canAccess(role, area) {
   if (role === ROLES.ADMIN) return true
   if (role === ROLES.RH) return ['rh', 'empleado'].includes(area)
   if (role === ROLES.SUPERVISOR) return ['rh-inbox', 'empleado'].includes(area)
+
   return area === 'empleado'
 }
-
 export function clockIn(userId) {
   const user = getUser(userId)
-  if (!user?.active) return { ok: false, message: 'No se puede registrar asistencia de una cuenta inactiva.' }
-  const date = localISO()
-  const existing = state.attendances.find((a) => a.userId === userId && a.date === date)
-  if (existing?.checkIn) {
-    return { ok: false, message: 'Ya registraste tu hora de entrada hoy. Si hay un error, RH puede corregirlo en reportes.' }
+
+  if (!user?.active) {
+    return {
+      ok: false,
+      message: 'No se puede registrar asistencia de una cuenta inactiva.',
+    }
   }
+
+  const date = localISO()
+
+  const existing = state.attendances.find(
+    (a) => a.userId === userId && a.date === date,
+  )
+
+  if (existing?.checkIn) {
+    return {
+      ok: false,
+      message: 'Ya registraste tu hora de entrada hoy. Si hay un error, RH puede corregirlo en reportes.',
+    }
+  }
+
   const now = new Date()
   const checkIn = hm(now)
   const shift = getShift(user.shiftId)
-  const lateMinutes = shift ? Math.max(0, minutesOf(checkIn) - minutesOf(shift.start) - state.config.graceMinutes) : 0
+
+  const lateMinutes = shift
+    ? Math.max(
+        0,
+        minutesOf(checkIn) -
+          minutesOf(shift.start) -
+          state.config.graceMinutes,
+      )
+    : 0
+
   patch((draft) => {
     draft.attendances.unshift({
       id: uid('att'),
@@ -463,9 +687,12 @@ export function clockIn(userId) {
       holidayHoursOverride: null,
       notes: '',
     })
+
     return draft
   })
+
   const holiday = isHoliday(date)
+
   return {
     ok: true,
     late: lateMinutes > 0,
@@ -473,28 +700,47 @@ export function clockIn(userId) {
     checkIn,
     clock: formatTime(now),
     holiday,
-    message: lateMinutes > 0
-      ? `Entrada registrada a las ${checkIn} (${lateMinutes} min de retardo). Puedes justificar el retardo.`
-      : `Entrada registrada a las ${checkIn} con el reloj del sistema.`,
+    message:
+      lateMinutes > 0
+        ? `Entrada registrada a las ${checkIn} (${lateMinutes} min de retardo). Puedes justificar el retardo.`
+        : `Entrada registrada a las ${checkIn} con el reloj del sistema.`,
   }
 }
 
 export function clockOut(userId) {
   const date = localISO()
-  const existing = state.attendances.find((a) => a.userId === userId && a.date === date)
+
+  const existing = state.attendances.find(
+    (a) => a.userId === userId && a.date === date,
+  )
+
   if (!existing?.checkIn) {
-    return { ok: false, message: 'No hay una entrada abierta hoy. Primero registra la hora de entrada.' }
+    return {
+      ok: false,
+      message: 'No hay una entrada abierta hoy. Primero registra la hora de entrada.',
+    }
   }
+
   if (existing.checkOut) {
-    return { ok: false, message: 'La salida de hoy ya está cerrada. RH puede ajustar el registro desde reportes si hace falta.' }
+    return {
+      ok: false,
+      message: 'La salida de hoy ya está cerrada. RH puede ajustar el registro desde reportes si hace falta.',
+    }
   }
+
   const now = new Date()
   const checkOut = hm(now)
+
   patch((draft) => {
-    const rec = draft.attendances.find((a) => a.id === existing.id)
+    const rec = draft.attendances.find(
+      (a) => a.id === existing.id,
+    )
+
     rec.checkOut = checkOut
+
     return draft
   })
+
   return {
     ok: true,
     checkOut,
@@ -503,9 +749,26 @@ export function clockOut(userId) {
   }
 }
 
-export function createRequest({ userId, type, date, reason }) {
-  if (!reason?.trim()) return { ok: false, message: 'Describe el motivo. RH necesita el detalle para autorizar o rechazar.' }
-  if (!date) return { ok: false, message: 'Selecciona la fecha de la incidencia o permiso.' }
+export function createRequest({
+  userId,
+  type,
+  date,
+  reason,
+}) {
+  if (!reason?.trim()) {
+    return {
+      ok: false,
+      message: 'Describe el motivo. RH necesita el detalle para autorizar o rechazar.',
+    }
+  }
+
+  if (!date) {
+    return {
+      ok: false,
+      message: 'Selecciona la fecha de la incidencia o permiso.',
+    }
+  }
+
   patch((draft) => {
     draft.requests.unshift({
       id: uid('req'),
@@ -518,74 +781,211 @@ export function createRequest({ userId, type, date, reason }) {
       reviewerId: null,
       reviewNote: '',
     })
+
     return draft
   })
-  return { ok: true, message: 'Solicitud enviada a la bandeja de Recursos Humanos / Supervisor.' }
+
+  return {
+    ok: true,
+    message: 'Solicitud enviada a la bandeja de Recursos Humanos / Supervisor.',
+  }
 }
 
-export function reviewRequest({ requestId, status, reviewerId, reviewNote }) {
-  const req = state.requests.find((r) => r.id === requestId)
-  if (!req) return { ok: false, message: 'No se encontró la solicitud.' }
+export function reviewRequest({
+  requestId,
+  status,
+  reviewerId,
+  reviewNote,
+}) {
+  const req = state.requests.find(
+    (r) => r.id === requestId,
+  )
+
+  if (!req) {
+    return {
+      ok: false,
+      message: 'No se encontró la solicitud.',
+    }
+  }
+
   patch((draft) => {
-    const target = draft.requests.find((r) => r.id === requestId)
+    const target = draft.requests.find(
+      (r) => r.id === requestId,
+    )
+
     const previous = target.status
+
     target.status = status
     target.reviewerId = reviewerId
     target.reviewNote = reviewNote?.trim() || ''
+
     addAudit(draft, {
       userId: reviewerId,
-      action: status === 'aprobada' ? 'Autorizar permiso/falta' : 'Rechazar permiso/falta',
+      action:
+        status === 'aprobada'
+          ? 'Autorizar permiso/falta'
+          : 'Rechazar permiso/falta',
       entity: requestId,
       previousValue: previous,
       newValue: status,
     })
+
     return draft
   })
-  return { ok: true, message: status === 'aprobada' ? 'Solicitud autorizada.' : 'Solicitud rechazada.' }
+
+  return {
+    ok: true,
+    message:
+      status === 'aprobada'
+        ? 'Solicitud autorizada.'
+        : 'Solicitud rechazada.',
+  }
 }
 
-export function upsertHoliday({ id, date, name, actorId }) {
-  if (!date || !name?.trim()) return { ok: false, message: 'Indica fecha y nombre del día festivo.' }
+export function upsertHoliday({
+  id,
+  date,
+  name,
+  actorId,
+}) {
+  if (!date || !name?.trim()) {
+    return {
+      ok: false,
+      message: 'Indica fecha y nombre del día festivo.',
+    }
+  }
+
   patch((draft) => {
     if (id) {
-      const current = draft.holidays.find((h) => h.id === id)
+      const current = draft.holidays.find(
+        (h) => h.id === id,
+      )
+
       const previous = `${current.date} ${current.name}`
+
       current.date = date
       current.name = name.trim()
-      addAudit(draft, { userId: actorId, action: 'Editar día festivo', entity: id, previousValue: previous, newValue: `${date} ${name}` })
+
+      addAudit(draft, {
+        userId: actorId,
+        action: 'Editar día festivo',
+        entity: id,
+        previousValue: previous,
+        newValue: `${date} ${name}`,
+      })
     } else {
       const newId = uid('hol')
-      draft.holidays.push({ id: newId, date, name: name.trim() })
-      addAudit(draft, { userId: actorId, action: 'Alta de día festivo', entity: newId, previousValue: '', newValue: `${date} ${name}` })
+
+      draft.holidays.push({
+        id: newId,
+        date,
+        name: name.trim(),
+      })
+
+      addAudit(draft, {
+        userId: actorId,
+        action: 'Alta de día festivo',
+        entity: newId,
+        previousValue: '',
+        newValue: `${date} ${name}`,
+      })
     }
+
     return draft
   })
-  return { ok: true, message: 'Calendario de festivos actualizado.' }
+
+  return {
+    ok: true,
+    message: 'Calendario de festivos actualizado.',
+  }
 }
 
 export function removeHoliday(id, actorId) {
-  const current = state.holidays.find((h) => h.id === id)
+  const current = state.holidays.find(
+    (h) => h.id === id,
+  )
+
   patch((draft) => {
-    draft.holidays = draft.holidays.filter((h) => h.id !== id)
-    addAudit(draft, { userId: actorId, action: 'Baja de día festivo', entity: id, previousValue: `${current?.date} ${current?.name}`, newValue: 'eliminado' })
+    draft.holidays = draft.holidays.filter(
+      (h) => h.id !== id,
+    )
+
+    addAudit(draft, {
+      userId: actorId,
+      action: 'Baja lógica de día festivo',
+      entity: id,
+      previousValue: `${current?.date} ${current?.name}`,
+      newValue: 'eliminado',
+    })
+
     return draft
   })
-  return { ok: true, message: 'Festivo eliminado del calendario.' }
+
+  return {
+    ok: true,
+    message: 'Festivo eliminado del calendario.',
+  }
 }
 
 export async function saveEmployee(payload, actorId) {
-  const { id, name, username, position, salary, password, shiftId, role, active } = payload
-  if (!name?.trim() || !username?.trim()) return { ok: false, message: 'Nombre y usuario son obligatorios.' }
-  if (!id && (!password || password.length < 8)) return { ok: false, message: 'La contraseña inicial debe tener mínimo 8 caracteres.' }
-  if (password && password.length < 8) return { ok: false, message: 'La contraseña debe tener mínimo 8 caracteres.' }
-  const duplicate = state.users.find((u) => u.username.toLowerCase() === username.trim().toLowerCase() && u.id !== id)
-  if (duplicate) return { ok: false, message: 'Ese nombre de usuario ya está en uso. Elige otro.' }
+  const {
+    id,
+    name,
+    username,
+    position,
+    salary,
+    password,
+    shiftId,
+    role,
+    active,
+  } = payload
 
-  const passwordHash = password ? await hashPassword(password) : null
+  if (!name?.trim() || !username?.trim()) {
+    return {
+      ok: false,
+      message: 'Nombre y usuario son obligatorios.',
+    }
+  }
+
+  if (!id && (!password || password.length < 8)) {
+    return {
+      ok: false,
+      message: 'La contraseña inicial debe tener mínimo 8 caracteres.',
+    }
+  }
+
+  if (password && password.length < 8) {
+    return {
+      ok: false,
+      message: 'La contraseña debe tener mínimo 8 caracteres.',
+    }
+  }
+
+  const duplicate = state.users.find(
+    (u) =>
+      u.username.toLowerCase() === username.trim().toLowerCase() &&
+      u.id !== id,
+  )
+
+  if (duplicate) {
+    return {
+      ok: false,
+      message: 'Ese nombre de usuario ya está en uso. Elige otro.',
+    }
+  }
+
+  const passwordHash = password
+    ? await hashPassword(password)
+    : null
+
   patch((draft) => {
     if (id) {
-      const user = draft.users.find((u) => u.id === id)
+      const user = draft.users.find(
+        (u) => u.id === id,
+      )
+
       const previous = `${user.name} | ${user.position} | $${user.salary}`
+
       user.name = name.trim()
       user.username = username.trim()
       user.position = position
@@ -594,14 +994,23 @@ export async function saveEmployee(payload, actorId) {
       user.shiftId = shiftId
       user.active = active
       user.updatedAt = new Date().toISOString()
+
       if (passwordHash) {
         user.passwordHash = passwordHash
         user.locked = false
         user.failedAttempts = 0
       }
-      addAudit(draft, { userId: actorId, action: 'Modificar empleado', entity: id, previousValue: previous, newValue: `${user.name} | ${user.position} | $${user.salary}` })
+
+      addAudit(draft, {
+        userId: actorId,
+        action: 'Modificar empleado',
+        entity: id,
+        previousValue: previous,
+        newValue: `${user.name} | ${user.position} | $${user.salary}`,
+      })
     } else {
       const newId = uid('usr')
+
       draft.users.push({
         id: newId,
         username: username.trim(),
@@ -617,69 +1026,193 @@ export async function saveEmployee(payload, actorId) {
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       })
-      addAudit(draft, { userId: actorId, action: 'Alta de empleado', entity: newId, previousValue: '', newValue: name })
+
+      addAudit(draft, {
+        userId: actorId,
+        action: 'Alta de empleado',
+        entity: newId,
+        previousValue: '',
+        newValue: name,
+      })
     }
+
     return draft
   })
-  return { ok: true, message: id ? 'Datos del personal actualizados.' : 'Empleado dado de alta.' }
+
+  return {
+    ok: true,
+    message: id
+      ? 'Datos del personal actualizados.'
+      : 'Empleado dado de alta.',
+  }
 }
 
 export function deactivateEmployee(id, actorId) {
   const user = getUser(id)
+
   patch((draft) => {
-    const target = draft.users.find((u) => u.id === id)
+    const target = draft.users.find(
+      (u) => u.id === id,
+    )
+
     target.active = false
     target.updatedAt = new Date().toISOString()
-    addAudit(draft, { userId: actorId, action: 'Baja lógica de empleado', entity: id, previousValue: 'activo', newValue: 'inactivo' })
+
+    addAudit(draft, {
+      userId: actorId,
+      action: 'Baja lógica de empleado',
+      entity: id,
+      previousValue: 'activo',
+      newValue: 'inactivo',
+    })
+
     return draft
   })
-  return { ok: true, message: `${user.name} queda inactivo. Se conserva su historial de asistencia.` }
+
+  return {
+    ok: true,
+    message: `${user.name} queda inactivo. Se conserva su historial de asistencia.`,
+  }
 }
 
 export function saveShift(payload, actorId) {
-  const { id, name, start, end, breakMinutes, weeklyDays } = payload
-  if (!name?.trim() || !start || !end) return { ok: false, message: 'Completa nombre, hora de inicio y hora de fin.' }
+  const {
+    id,
+    name,
+    start,
+    end,
+    breakMinutes,
+    weeklyDays,
+  } = payload
+
+  if (!name?.trim() || !start || !end) {
+    return {
+      ok: false,
+      message: 'Completa nombre, hora de inicio y hora de fin.',
+    }
+  }
+
   patch((draft) => {
     if (id) {
-      const shift = draft.shifts.find((s) => s.id === id)
+      const shift = draft.shifts.find(
+        (s) => s.id === id,
+      )
+
       const previous = `${shift.name} ${shift.start}-${shift.end}`
-      Object.assign(shift, { name: name.trim(), start, end, breakMinutes: Number(breakMinutes) || 0, weeklyDays })
-      addAudit(draft, { userId: actorId, action: 'Modificar turno', entity: id, previousValue: previous, newValue: `${name} ${start}-${end}` })
+
+      Object.assign(shift, {
+        name: name.trim(),
+        start,
+        end,
+        breakMinutes: Number(breakMinutes) || 0,
+        weeklyDays,
+      })
+
+      addAudit(draft, {
+        userId: actorId,
+        action: 'Modificar turno',
+        entity: id,
+        previousValue: previous,
+        newValue: `${name} ${start}-${end}`,
+      })
     } else {
       const newId = uid('shift')
-      draft.shifts.push({ id: newId, name: name.trim(), start, end, breakMinutes: Number(breakMinutes) || 0, weeklyDays })
-      addAudit(draft, { userId: actorId, action: 'Alta de turno', entity: newId, previousValue: '', newValue: `${name} ${start}-${end}` })
+
+      draft.shifts.push({
+        id: newId,
+        name: name.trim(),
+        start,
+        end,
+        breakMinutes: Number(breakMinutes) || 0,
+        weeklyDays,
+      })
+
+      addAudit(draft, {
+        userId: actorId,
+        action: 'Alta de turno',
+        entity: newId,
+        previousValue: '',
+        newValue: `${name} ${start}-${end}`,
+      })
     }
+
     return draft
   })
-  return { ok: true, message: 'Horario / turno guardado.' }
+
+  return {
+    ok: true,
+    message: 'Horario / turno guardado.',
+  }
 }
 
 export function saveConfig(partial, actorId) {
   patch((draft) => {
     const previous = JSON.stringify(draft.config)
-    draft.config = { ...draft.config, ...partial }
-    addAudit(draft, { userId: actorId, action: 'Actualizar configuración de nómina', entity: 'config', previousValue: previous, newValue: JSON.stringify(draft.config) })
+
+    draft.config = {
+      ...draft.config,
+      ...partial,
+    }
+
+    addAudit(draft, {
+      userId: actorId,
+      action: 'Actualizar configuración de nómina',
+      entity: 'config',
+      previousValue: previous,
+      newValue: JSON.stringify(draft.config),
+    })
+
     return draft
   })
 }
 
-export function adjustAttendance({ attendanceId, extraHoursOverride, holidayHoursOverride, notes, actorId, checkIn, checkOut }) {
-  const rec = state.attendances.find((a) => a.id === attendanceId)
-  if (!rec) return { ok: false, message: 'No se encontró el registro de asistencia.' }
+export function adjustAttendance({
+  attendanceId,
+  extraHoursOverride,
+  holidayHoursOverride,
+  notes,
+  actorId,
+  checkIn,
+  checkOut,
+}) {
+  const rec = state.attendances.find(
+    (a) => a.id === attendanceId,
+  )
+
+  if (!rec) {
+    return {
+      ok: false,
+      message: 'No se encontró el registro de asistencia.',
+    }
+  }
+
   patch((draft) => {
-    const target = draft.attendances.find((a) => a.id === attendanceId)
+    const target = draft.attendances.find(
+      (a) => a.id === attendanceId,
+    )
+
     const previous = JSON.stringify({
       extra: target.extraHoursOverride,
       holiday: target.holidayHoursOverride,
       in: target.checkIn,
       out: target.checkOut,
     })
+
     if (checkIn != null) target.checkIn = checkIn
     if (checkOut != null) target.checkOut = checkOut
-    target.extraHoursOverride = extraHoursOverride === '' || extraHoursOverride == null ? null : Number(extraHoursOverride)
-    target.holidayHoursOverride = holidayHoursOverride === '' || holidayHoursOverride == null ? null : Number(holidayHoursOverride)
+
+    target.extraHoursOverride =
+      extraHoursOverride === '' || extraHoursOverride == null
+        ? null
+        : Number(extraHoursOverride)
+
+    target.holidayHoursOverride =
+      holidayHoursOverride === '' || holidayHoursOverride == null
+        ? null
+        : Number(holidayHoursOverride)
+
     target.notes = notes ?? target.notes
+
     addAudit(draft, {
       userId: actorId,
       action: 'Modificar reporte / horas extras o festivas',
@@ -692,27 +1225,67 @@ export function adjustAttendance({ attendanceId, extraHoursOverride, holidayHour
         out: target.checkOut,
       }),
     })
+
     return draft
   })
-  return { ok: true, message: 'Ajuste guardado en el reporte y en la bitácora.' }
+
+  return {
+    ok: true,
+    message: 'Ajuste guardado en el reporte y en la bitácora.',
+  }
 }
 
 export function computeDay(record, user) {
   const shift = getShift(user.shiftId)
   const holiday = isHoliday(record.date)
+
   if (!record.checkIn || !record.checkOut || !shift) {
-    return { worked: 0, normal: 0, extra: 0, holidayHours: 0, holiday }
+    return {
+      worked: 0,
+      normal: 0,
+      extra: 0,
+      holidayHours: 0,
+      holiday,
+    }
   }
+
   const raw = hoursBetween(record.checkIn, record.checkOut)
   const breakH = (shift.breakMinutes || 0) / 60
-  const worked = Math.max(0, Math.round((raw - breakH) * 100) / 100)
-  const jornada = Math.max(0, hoursBetween(shift.start, shift.end) - breakH)
-  let extra = Math.max(0, Math.round((worked - jornada) * 100) / 100)
+
+  const worked = Math.max(
+    0,
+    Math.round((raw - breakH) * 100) / 100,
+  )
+
+  const jornada = Math.max(
+    0,
+    hoursBetween(shift.start, shift.end) - breakH,
+  )
+
+  let extra = Math.max(
+    0,
+    Math.round((worked - jornada) * 100) / 100,
+  )
+
   let holidayHours = holiday ? worked : 0
   let normal = holiday ? 0 : Math.min(worked, jornada)
-  if (record.extraHoursOverride != null) extra = Number(record.extraHoursOverride)
-  if (record.holidayHoursOverride != null) holidayHours = Number(record.holidayHoursOverride)
-  return { worked, normal, extra, holidayHours, holiday, jornada }
+
+  if (record.extraHoursOverride != null) {
+    extra = Number(record.extraHoursOverride)
+  }
+
+  if (record.holidayHoursOverride != null) {
+    holidayHours = Number(record.holidayHoursOverride)
+  }
+
+  return {
+    worked,
+    normal,
+    extra,
+    holidayHours,
+    holiday,
+    jornada,
+  }
 }
 
 export function hourlyRate(user) {
@@ -721,9 +1294,11 @@ export function hourlyRate(user) {
 
 export function estimatePay(calc, user) {
   const hour = hourlyRate(user)
+
   const normalPay = calc.normal * hour
   const extraPay = calc.extra * hour * state.config.extraHourMultiplier
   const holidayPay = calc.holidayHours * hour * state.config.holidayHourMultiplier
+
   return {
     hour,
     normalPay,
@@ -733,28 +1308,67 @@ export function estimatePay(calc, user) {
   }
 }
 
-export function buildReport({ userId, from, to }) {
-  const users = state.users.filter((u) => (userId ? u.id === userId : u.role !== ROLES.ADMIN))
+export function buildReport({
+  userId,
+  from,
+  to,
+}) {
+  const users = state.users.filter(
+    (u) => (userId ? u.id === userId : u.role !== ROLES.ADMIN),
+  )
+
   return users.map((user) => {
-    const records = state.attendances.filter((a) => a.userId === user.id && a.date >= from && a.date <= to)
-    const reqs = state.requests.filter((r) => r.userId === user.id && r.date >= from && r.date <= to)
+    const records = state.attendances.filter(
+      (a) =>
+        a.userId === user.id &&
+        a.date >= from &&
+        a.date <= to,
+    )
+
+    const reqs = state.requests.filter(
+      (r) =>
+        r.userId === user.id &&
+        r.date >= from &&
+        r.date <= to,
+    )
+
     let lateCount = 0
     let extra = 0
     let holidayHours = 0
     let normal = 0
     let workedDays = 0
+
     records.forEach((rec) => {
       const calc = computeDay(rec, user)
+
       if (rec.late) lateCount += 1
+
       extra += calc.extra
       holidayHours += calc.holidayHours
       normal += calc.normal
+
       if (rec.checkIn) workedDays += 1
     })
-    const authorizedAbsences = reqs.filter((r) => ['falta', 'permiso'].includes(r.type) && r.status === 'aprobada').length
-    const pending = reqs.filter((r) => r.status === 'pendiente').length
-    const rejected = reqs.filter((r) => r.status === 'rechazada').length
-    const pay = estimatePay({ normal, extra, holidayHours }, user)
+
+    const authorizedAbsences = reqs.filter(
+      (r) =>
+        ['falta', 'permiso'].includes(r.type) &&
+        r.status === 'aprobada',
+    ).length
+
+    const pending = reqs.filter(
+      (r) => r.status === 'pendiente',
+    ).length
+
+    const rejected = reqs.filter(
+      (r) => r.status === 'rechazada',
+    ).length
+
+    const pay = estimatePay(
+      { normal, extra, holidayHours },
+      user,
+    )
+
     return {
       user,
       records,
@@ -776,18 +1390,29 @@ function round2(n) {
 }
 
 export function money(n) {
-  return new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(n || 0)
+  return new Intl.NumberFormat('es-MX', {
+    style: 'currency',
+    currency: 'MXN',
+  }).format(n || 0)
 }
 
 export function formatDateTime(value) {
   const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString('es-MX', { dateStyle: 'medium', timeStyle: 'short' })
+
+  if (Number.isNaN(date.getTime())) {
+    return value
+  }
+
+  return date.toLocaleString('es-MX', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  })
 }
 
 export function roleFromPosition(position) {
   if (position === 'Administrador') return ROLES.ADMIN
   if (position === 'Recursos Humanos') return ROLES.RH
   if (position === 'Supervisor de área') return ROLES.SUPERVISOR
+
   return ROLES.EMPLEADO
 }
