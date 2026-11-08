@@ -1,4 +1,3 @@
-import bcrypt from 'bcryptjs'
 import pool from '../config/database.js'
 
 function normalizeRole(value) {
@@ -25,7 +24,10 @@ export async function login(req, res, next) {
     const password = String(req.body?.password || '')
 
     if (!username || !password) {
-      return res.status(400).json({ ok: false, message: 'Escribe tu usuario y contraseña.' })
+      return res.status(400).json({
+        ok: false,
+        message: 'Escribe tu usuario y contraseña.',
+      })
     }
 
     const [rows] = await pool.execute(
@@ -40,25 +42,40 @@ export async function login(req, res, next) {
     )
 
     const employee = rows[0]
-    // Mensaje genérico para no revelar si el usuario existe.
+
     if (!employee) {
-      return res.status(401).json({ ok: false, message: 'Usuario o contraseña incorrectos.' })
-    }
-    if (!employee.activo) {
-      return res.status(403).json({ ok: false, message: 'Esta cuenta está inactiva. Contacta a Recursos Humanos.' })
-    }
-    if (employee.bloqueado) {
-      return res.status(423).json({ ok: false, message: 'La cuenta está bloqueada. Contacta al administrador.' })
+      return res.status(401).json({
+        ok: false,
+        message: 'Usuario o contraseña incorrectos.',
+      })
     }
 
-    const validPassword = await bcrypt.compare(password, employee.contrasena)
+    if (!employee.activo) {
+      return res.status(403).json({
+        ok: false,
+        message: 'Esta cuenta está inactiva. Contacta a Recursos Humanos.',
+      })
+    }
+
+    if (employee.bloqueado) {
+      return res.status(423).json({
+        ok: false,
+        message: 'La cuenta está bloqueada. Contacta al administrador.',
+      })
+    }
+
+    // Comparación directa porque las contraseñas están en texto plano.
+    const validPassword = password === employee.contrasena
+
     if (!validPassword) {
       const attempts = Number(employee.intentos_fallidos || 0) + 1
       const locked = attempts >= 5 ? 1 : 0
+
       await pool.execute(
         'UPDATE empleado SET intentos_fallidos = ?, bloqueado = ? WHERE id_empleado = ?',
         [attempts, locked, employee.id_empleado],
       )
+
       return res.status(401).json({
         ok: false,
         message: locked
@@ -73,20 +90,33 @@ export async function login(req, res, next) {
     )
 
     req.session.employee = publicEmployee(employee)
-    return res.json({ ok: true, employee: req.session.employee })
+
+    return res.json({
+      ok: true,
+      employee: req.session.employee,
+    })
+
   } catch (error) {
     next(error)
   }
 }
 
 export function currentUser(req, res) {
-  res.json({ ok: true, employee: req.session.employee || null })
+  res.json({
+    ok: true,
+    employee: req.session.employee || null,
+  })
 }
 
 export function logout(req, res, next) {
   req.session.destroy((error) => {
     if (error) return next(error)
+
     res.clearCookie('mb.sid')
-    res.json({ ok: true, message: 'Sesión cerrada.' })
+
+    res.json({
+      ok: true,
+      message: 'Sesión cerrada.',
+    })
   })
 }
