@@ -17,76 +17,111 @@ export async function today(req, res, next) {
 }
 
 export async function clockIn(req, res, next) {
-  const connection = await pool.getConnection()
+  let connection
+
   try {
+    connection = await pool.getConnection()
+
     const employeeId = req.session.employee.id
+
     await connection.beginTransaction()
 
     const [existing] = await connection.execute(
-      'SELECT id_asistencia, fecha_hora_entrada, fecha_hora_salida FROM asistencia WHERE id_empleado = ? AND fecha = CURDATE() FOR UPDATE',
+      `SELECT id_asistencia, fecha_hora_entrada, fecha_hora_salida
+         FROM asistencia
+        WHERE id_empleado = ? AND fecha = CURDATE()
+        FOR UPDATE`,
       [employeeId],
     )
 
     if (existing.length && existing[0].fecha_hora_entrada) {
       await connection.rollback()
-      return res.status(409).json({ ok: false, message: 'Ya registraste tu entrada hoy.' })
+
+      return res.status(409).json({
+        ok: false,
+        message: 'Ya registraste tu entrada hoy.',
+      })
     }
 
     if (existing.length) {
       await connection.execute(
-        'UPDATE asistencia SET fecha_hora_entrada = NOW() WHERE id_asistencia = ?',
-        [existing[0].id_asistencia],
+        `UPDATE asistencia
+            SET fecha_hora_entrada = NOW(),
+                id_registro_entrada = ?
+          WHERE id_asistencia = ?`,
+        [employeeId, existing[0].id_asistencia],
       )
     } else {
       await connection.execute(
-        `INSERT INTO asistencia
-          (fecha, fecha_hora_entrada, id_empleado)
-         VALUES (CURDATE(), NOW(), ?)`,
-        [employeeId],
+        `INSERT INTO asistencia (
+          fecha,
+          fecha_hora_entrada,
+          id_empleado,
+          id_registro_entrada
+        )
+        VALUES (CURDATE(), NOW(), ?, ?)`,
+        [employeeId, employeeId],
       )
     }
 
     const [rows] = await connection.execute(
       `SELECT id_asistencia, fecha, fecha_hora_entrada, fecha_hora_salida
-         FROM asistencia WHERE id_empleado = ? AND fecha = CURDATE() LIMIT 1`,
+         FROM asistencia
+        WHERE id_empleado = ? AND fecha = CURDATE()
+        LIMIT 1`,
       [employeeId],
     )
+
     await connection.commit()
-    res.status(201).json({ ok: true, message: 'Entrada registrada correctamente.', attendance: rows[0] })
+
+    res.status(201).json({
+      ok: true,
+      message: 'Entrada registrada correctamente.',
+      attendance: rows[0],
+    })
   } catch (error) {
-    await connection.rollback()
-    if (error.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({ ok: false, message: 'Ya existe una asistencia para hoy.' })
-    }
+    if (connection) await connection.rollback()
     next(error)
   } finally {
-    connection.release()
+    if (connection) connection.release()
   }
 }
 
 export async function clockOut(req, res, next) {
   try {
     const employeeId = req.session.employee.id
+
     const [result] = await pool.execute(
       `UPDATE asistencia
-          SET fecha_hora_salida = NOW()
+          SET fecha_hora_salida = NOW(),
+              id_registro_salida = ?
         WHERE id_empleado = ?
           AND fecha = CURDATE()
           AND fecha_hora_entrada IS NOT NULL
           AND fecha_hora_salida IS NULL`,
-      [employeeId],
+      [employeeId, employeeId],
     )
 
     if (result.affectedRows !== 1) {
-      return res.status(409).json({ ok: false, message: 'No hay una entrada pendiente de salida para hoy.' })
+      return res.status(409).json({
+        ok: false,
+        message: 'No hay una entrada pendiente de salida para hoy.',
+      })
     }
 
     const [rows] = await pool.execute(
       `SELECT id_asistencia, fecha, fecha_hora_entrada, fecha_hora_salida
-         FROM asistencia WHERE id_empleado = ? AND fecha = CURDATE() LIMIT 1`,
+         FROM asistencia
+        WHERE id_empleado = ? AND fecha = CURDATE()
+        LIMIT 1`,
       [employeeId],
     )
-    res.json({ ok: true, message: 'Salida registrada correctamente.', attendance: rows[0] })
+
+    res.json({
+      ok: true,
+      message: 'Salida registrada correctamente.',
+      attendance: rows[0],
+    })
   } catch (error) {
     next(error)
   }

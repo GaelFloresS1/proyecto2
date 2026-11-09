@@ -4,12 +4,13 @@
  * - Justificar retardo (extiende el marcaje de entrada).
  * - Solicitar permiso o falta.
  */
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { AlertTriangle, LogIn, LogOut } from 'lucide-react'
 import { Badge, Button, Card, Field, inputClass, PageHeader, Toast } from '../components'
 import {
   clockIn,
   clockOut,
+  loadMyAttendance,
   createRequest,
   formatDateTime,
   getShift,
@@ -24,19 +25,41 @@ export function EmployeeClock() {
   const user = getUser()
   const data = getState()
   const [toast, setToast] = useState(null)
+
+  useEffect(() => {
+    loadMyAttendance().then((result) => {
+      if (!result.ok) {
+        setToast({
+          type: 'error',
+          message: result.message,
+        })
+      }
+    })
+  }, [])
+
   const today = localISO()
   const shift = getShift(user.shiftId)
   const todayRec = data.attendances.find((a) => a.userId === user.id && a.date === today)
   const history = data.attendances.filter((a) => a.userId === user.id).slice(0, 8)
 
-  function handleIn() {
-    const result = clockIn(user.id)
-    setToast({ type: result.ok ? (result.late ? 'warn' : 'ok') : 'error', message: result.message })
+  
+
+  async function handleIn() {
+  const result = await clockIn(user.id)
+
+  setToast({
+    type: result.ok ? (result.late ? 'warn' : 'ok') : 'error',
+    message: result.message,
+  })
   }
 
-  function handleOut() {
-    const result = clockOut(user.id)
-    setToast({ type: result.ok ? 'ok' : 'error', message: result.message })
+  async function handleOut() {
+  const result = await clockOut(user.id)
+
+  setToast({
+    type: result.ok ? 'ok' : 'error',
+    message: result.message,
+  })
   }
 
   return (

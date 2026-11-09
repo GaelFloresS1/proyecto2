@@ -63,6 +63,102 @@ async function authRequest(path, options = {}) {
   return { ok: true, ...data }
 }
 
+
+// Comunicación con el módulo de asistencia.
+async function attendanceRequest(path, options = {}) {
+  let response
+
+  try {
+    response = await fetch(`/api/attendance${path}`, {
+      credentials: 'include',
+      ...options,
+      headers: {
+        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+        ...options.headers,
+      },
+    })
+  } catch {
+    return {
+      ok: false,
+      message: 'No se pudo conectar con el servidor. Verifica que el backend esté iniciado.',
+    }
+  }
+
+  const data = await response.json().catch(() => ({}))
+
+  if (!response.ok || data.ok === false) {
+    return {
+      ok: false,
+      message: data.message || `Error de asistencia (${response.status}).`,
+    }
+  }
+
+  return { ok: true, ...data }
+}
+
+// Convierte una fecha de MySQL al formato YYYY-MM-DD.
+function dbDateToISO(value) {
+  if (!value) return ''
+
+  if (value instanceof Date) {
+    return localISO(value)
+  }
+
+  return String(value).slice(0, 10)
+}
+
+// Convierte un DATETIME de MySQL al formato HH:mm.
+function dbTimeToHM(value) {
+  if (!value) return null
+
+  if (value instanceof Date) {
+    return hm(value)
+  }
+
+  const text = String(value)
+
+  // Formato DATETIME: YYYY-MM-DD HH:mm:ss
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(text)) {
+    return text.slice(11, 16)
+  }
+
+  // Formato ISO.
+  const date = new Date(text)
+
+  return Number.isNaN(date.getTime()) ? null : hm(date)
+}
+
+// Convierte un registro de MySQL al formato utilizado por React.
+function mapAttendanceRow(row, user) {
+  const checkIn = dbTimeToHM(row.fecha_hora_entrada)
+  const checkOut = dbTimeToHM(row.fecha_hora_salida)
+  const shift = getShift(user.shiftId)
+
+  const lateMinutes = shift && checkIn
+    ? Math.max(
+        0,
+        minutesOf(checkIn) -
+          minutesOf(shift.start) -
+          state.config.graceMinutes,
+      )
+    : 0
+
+  return {
+    id: row.id_asistencia,
+    userId: user.id,
+    date: dbDateToISO(row.fecha),
+    checkIn,
+    checkOut,
+    source: 'sistema',
+    late: Boolean(row.retardo) || lateMinutes > 0,
+    lateMinutes,
+    extraHoursOverride: null,
+    holidayHoursOverride: null,
+    notes: '',
+  }
+}
+
+
 function mapEmployeeToUser(employee) {
   return {
     id: employee.id,
@@ -459,6 +555,51 @@ export function holidayName(date) {
   return state.holidays.find((h) => h.date === date)?.name
 }
 
+
+// =====================================================
+// ASISTENCIA CONECTADA A MYSQL
+// =====================================================
+
+export async function loadMyAttendance() {
+  const user = getUser()
+
+  if (!user) {
+    return {
+      ok: false,
+      message: 'No hay un empleado con sesión activa.',
+    }
+  }
+
+  const result = await attendanceRequest('/history')
+
+  if (!result.ok) {
+    return result
+  }
+
+  const records = (result.attendances || []).map((row) =>
+    mapAttendanceRow(row, user),
+  )
+
+  patch((draft) => {
+    // Eliminamos los registros simulados de este empleado.
+    draft.attendances = draft.attendances.filter(
+      (record) =>
+        String(record.userId) !== String(user.id),
+    )
+
+    // Incorporamos los registros obtenidos desde MySQL.
+    draft.attendances.push(...records)
+
+    return draft
+  })
+
+  return {
+    ok: true,
+    attendances: records,
+  }
+}
+
+
 // =====================================================
 // AUTENTICACIÓN CON EL BACKEND
 // =====================================================
@@ -637,7 +778,9 @@ export function canAccess(role, area) {
 
   return area === 'empleado'
 }
-export function clockIn(userId) {
+
+
+export async function clockIn(userId) {
   const user = getUser(userId)
 
   if (!user?.active) {
@@ -647,107 +790,102 @@ export function clockIn(userId) {
     }
   }
 
-  const date = localISO()
-
-  const existing = state.attendances.find(
-    (a) => a.userId === userId && a.date === date,
-  )
-
-  if (existing?.checkIn) {
-    return {
-      ok: false,
-      message: 'Ya registraste tu hora de entrada hoy. Si hay un error, RH puede corregirlo en reportes.',
-    }
-  }
-
-  const now = new Date()
-  const checkIn = hm(now)
-  const shift = getShift(user.shiftId)
-
-  const lateMinutes = shift
-    ? Math.max(
-        0,
-        minutesOf(checkIn) -
-          minutesOf(shift.start) -
-          state.config.graceMinutes,
-      )
-    : 0
-
-  patch((draft) => {
-    draft.attendances.unshift({
-      id: uid('att'),
-      userId,
-      date,
-      checkIn,
-      checkOut: null,
-      source: 'sistema',
-      late: lateMinutes > 0,
-      lateMinutes,
-      extraHoursOverride: null,
-      holidayHoursOverride: null,
-      notes: '',
-    })
-
-    return draft
+  // Solicita al backend registrar la entrada.
+  const result = await attendanceRequest('/clock-in', {
+    method: 'POST',
   })
 
-  const holiday = isHoliday(date)
-
-  return {
-    ok: true,
-    late: lateMinutes > 0,
-    lateMinutes,
-    checkIn,
-    clock: formatTime(now),
-    holiday,
-    message:
-      lateMinutes > 0
-        ? `Entrada registrada a las ${checkIn} (${lateMinutes} min de retardo). Puedes justificar el retardo.`
-        : `Entrada registrada a las ${checkIn} con el reloj del sistema.`,
-  }
-}
-
-export function clockOut(userId) {
-  const date = localISO()
-
-  const existing = state.attendances.find(
-    (a) => a.userId === userId && a.date === date,
-  )
-
-  if (!existing?.checkIn) {
-    return {
-      ok: false,
-      message: 'No hay una entrada abierta hoy. Primero registra la hora de entrada.',
-    }
+  if (!result.ok) {
+    return result
   }
 
-  if (existing.checkOut) {
-    return {
-      ok: false,
-      message: 'La salida de hoy ya está cerrada. RH puede ajustar el registro desde reportes si hace falta.',
-    }
-  }
+  // Convertimos la respuesta de MySQL.
+  const record = mapAttendanceRow(result.attendance, user)
 
-  const now = new Date()
-  const checkOut = hm(now)
-
+  // Actualizamos la copia local para refrescar la interfaz.
   patch((draft) => {
-    const rec = draft.attendances.find(
-      (a) => a.id === existing.id,
+    draft.attendances = draft.attendances.filter(
+      (a) =>
+        !(
+          String(a.userId) === String(userId) &&
+          a.date === record.date
+        ),
     )
 
-    rec.checkOut = checkOut
+    draft.attendances.unshift(record)
 
     return draft
   })
 
+  const now = new Date()
+  const holiday = isHoliday(record.date)
+
   return {
     ok: true,
-    checkOut,
+    late: record.late,
+    lateMinutes: record.lateMinutes,
+    checkIn: record.checkIn,
     clock: formatTime(now),
-    message: `Salida registrada a las ${checkOut}. Las horas se calcularán automáticamente para nómina.`,
+    holiday,
+    message: record.late
+      ? `Entrada registrada a las ${record.checkIn} (${record.lateMinutes} min de retardo).`
+      : `Entrada registrada a las ${record.checkIn} correctamente.`,
   }
 }
+
+
+
+export async function clockOut(userId) {
+  const user = getUser(userId)
+
+  if (!user?.active) {
+    return {
+      ok: false,
+      message: 'No se puede registrar asistencia de una cuenta inactiva.',
+    }
+  }
+
+  // Solicita al backend registrar la salida.
+  const result = await attendanceRequest('/clock-out', {
+    method: 'POST',
+  })
+
+  if (!result.ok) {
+    return result
+  }
+
+  const record = mapAttendanceRow(result.attendance, user)
+
+  // Actualizamos el registro local correspondiente.
+  patch((draft) => {
+    const index = draft.attendances.findIndex(
+      (a) =>
+        String(a.userId) === String(userId) &&
+        a.date === record.date,
+    )
+
+    if (index >= 0) {
+      draft.attendances[index] = {
+        ...draft.attendances[index],
+        ...record,
+      }
+    } else {
+      draft.attendances.unshift(record)
+    }
+
+    return draft
+  })
+
+  const now = new Date()
+
+  return {
+    ok: true,
+    checkOut: record.checkOut,
+    clock: formatTime(now),
+    message: `Salida registrada a las ${record.checkOut}. Las horas se calcularán automáticamente para nómina.`,
+  }
+}
+
 
 export function createRequest({
   userId,
