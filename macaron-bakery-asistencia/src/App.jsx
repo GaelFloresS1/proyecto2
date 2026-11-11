@@ -23,8 +23,25 @@ function Boot({ children }) {
   const [ready, setReady] = useState(false)
 
   useEffect(() => {
-    bootstrap().then(() => setReady(true))
-    return subscribe(() => setTick((n) => n + 1))
+    let active = true
+
+      bootstrap()
+      .then(() => {
+      if (active) setReady(true)
+      })
+      .catch((error) => {
+      console.error('Error al iniciar la aplicación:', error)
+      if (active) setReady(true)
+      })
+
+    const unsubscribe = subscribe(() => {
+    setTick((n) => n + 1)
+    })
+
+    return () => {
+    active = false
+    unsubscribe()
+    }
   }, [])
 
   if (!ready || !getState()) {
