@@ -96,6 +96,40 @@ async function attendanceRequest(path, options = {}) {
   return { ok: true, ...data }
 }
 
+
+ // Comunicación con el módulo de turnos.
+async function shiftRequest(path, options = {}) {
+  let response
+
+  try {
+    response = await fetch(`/api/shifts${path}`, {
+      credentials: 'include',
+      ...options,
+      headers: {
+        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+        ...options.headers,
+      },
+    })
+  } catch {
+    return {
+      ok: false,
+      message: 'No se pudo conectar con el servidor de turnos.',
+    }
+  }
+
+  const data = await response.json().catch(() => ({}))
+
+  if (!response.ok || data.ok === false) {
+    return {
+      ok: false,
+      message: data.message || `Error de turnos (${response.status}).`,
+    }
+  }
+
+  return { ...data, ok: true }
+}
+
+
 // Convierte una fecha de MySQL al formato YYYY-MM-DD.
 function dbDateToISO(value) {
   if (!value) return ''
@@ -504,12 +538,22 @@ export async function bootstrap() {
 
   const sessionResult = await authRequest('/me')
 
-  if (sessionResult.ok && sessionResult.employee) {
-    applyAuthenticatedEmployee(sessionResult.employee)
-  } else {
-    localStorage.setItem(KEY, JSON.stringify(state))
-    listeners.forEach((fn) => fn(state))
+  
+if (sessionResult.ok && sessionResult.employee) {
+  applyAuthenticatedEmployee(sessionResult.employee)
+
+  // Cargar los turnos reales desde MariaDB.
+  const shiftsResult = await loadShifts()
+
+  if (!shiftsResult.ok) {
+    console.error(shiftsResult.message)
   }
+} else {
+  state.shifts = []
+  localStorage.setItem(KEY, JSON.stringify(state))
+  listeners.forEach((fn) => fn(state))
+}
+
 
   return state
 }
@@ -546,6 +590,32 @@ export function getUser(id = state?.sessionUserId) {
 export function getShift(shiftId) {
   return state.shifts.find((s) => s.id === shiftId)
 }
+
+
+export async function loadShifts() {
+  const result = await shiftRequest('')
+
+  if (!result.ok) {
+    // Evita mostrar turnos de demostración como si fueran reales.
+    patch((draft) => {
+      draft.shifts = []
+      return draft
+    })
+
+    return result
+  }
+
+  patch((draft) => {
+    draft.shifts = result.shifts || []
+    return draft
+  })
+
+  return {
+    ok: true,
+    shifts: result.shifts || [],
+  }
+}
+
 
 export function isHoliday(date) {
   return state.holidays.some((h) => h.date === date)
@@ -624,12 +694,20 @@ export async function login(username, password) {
     }
   }
 
+  
   const user = applyAuthenticatedEmployee(result.employee)
 
-  return {
-    ok: true,
-    user,
+  const shiftsResult = await loadShifts()
+
+  if (!shiftsResult.ok) {
+  console.error('No se pudieron cargar los turnos:', shiftsResult.message)
   }
+
+  return {
+  ok: true,
+  user,
+  }
+
 }
 
 export async function getCurrentUser() {
@@ -1213,7 +1291,8 @@ export function deactivateEmployee(id, actorId) {
   }
 }
 
-export function saveShift(payload, actorId) {
+
+export async function saveShift(payload, actorId) {
   const {
     id,
     name,
@@ -1230,58 +1309,46 @@ export function saveShift(payload, actorId) {
     }
   }
 
-  patch((draft) => {
-    if (id) {
-      const shift = draft.shifts.find(
-        (s) => s.id === id,
-      )
-
-      const previous = `${shift.name} ${shift.start}-${shift.end}`
-
-      Object.assign(shift, {
-        name: name.trim(),
-        start,
-        end,
-        breakMinutes: Number(breakMinutes) || 0,
-        weeklyDays,
-      })
-
-      addAudit(draft, {
-        userId: actorId,
-        action: 'Modificar turno',
-        entity: id,
-        previousValue: previous,
-        newValue: `${name} ${start}-${end}`,
-      })
-    } else {
-      const newId = uid('shift')
-
-      draft.shifts.push({
-        id: newId,
-        name: name.trim(),
-        start,
-        end,
-        breakMinutes: Number(breakMinutes) || 0,
-        weeklyDays,
-      })
-
-      addAudit(draft, {
-        userId: actorId,
-        action: 'Alta de turno',
-        entity: newId,
-        previousValue: '',
-        newValue: `${name} ${start}-${end}`,
-      })
+  // La edición se conectará cuando tengamos PUT /api/shifts/:id.
+  if (id != null) {
+    return {
+      ok: false,
+      message: 'La edición de turnos todavía no está habilitada.',
     }
+  }
 
-    return draft
+  const result = await shiftRequest('', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: name.trim(),
+      start,
+      end,
+      breakMinutes: Number(breakMinutes),
+      weeklyDays,
+    }),
   })
+
+  if (!result.ok) {
+    return result
+  }
+
+  // Refrescamos la información desde MariaDB.
+  const reloadResult = await loadShifts()
+
+  if (!reloadResult.ok) {
+    return {
+      ok: false,
+      message: 'El turno se guardó, pero no se pudo actualizar la lista. Recarga la página.',
+    }
+  }
 
   return {
     ok: true,
-    message: 'Horario / turno guardado.',
+    message: result.message || 'Turno registrado correctamente.',
+    shift: result.shift,
   }
 }
+
 
 export function saveConfig(partial, actorId) {
   patch((draft) => {

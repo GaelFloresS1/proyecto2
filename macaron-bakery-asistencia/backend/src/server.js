@@ -6,7 +6,9 @@ import session from 'express-session'
 import { rateLimit } from 'express-rate-limit'
 import authRoutes from './routes/authRoutes.js'
 import attendanceRoutes from './routes/attendanceRoutes.js'
+import shiftRoutes from './routes/shiftRoutes.js'
 import { testDatabaseConnection } from './config/database.js'
+
 
 const app = express()
 const port = Number(process.env.PORT || 3000)
@@ -51,6 +53,7 @@ app.get('/api/health', async (_req, res, next) => {
 app.use('/api/auth/login', loginLimiter)
 app.use('/api/auth', authRoutes)
 app.use('/api/attendance', attendanceRoutes)
+app.use('/api/shifts', shiftRoutes)
 
 app.use((error, _req, res, _next) => {
   console.error(error)
