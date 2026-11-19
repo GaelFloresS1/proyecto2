@@ -3,22 +3,23 @@
  * RF-01 a RF-03: altas, baja lógica y cambios de personal.
  * CU Configurar Horario/Turno y tarifas de extra/festivo (RI-008, RI-009).
  */
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Badge, Button, Card, Field, inputClass, Modal, PageHeader, Toast } from '../components'
 import {
+  activateEmployee,
+  activateShift,
   deactivateEmployee,
   deactivateShift,
+  getCurrentUser,
   getState,
   getUser,
+  loadEmployees,
+  loadShifts,
   money,
   POSITIONS,
-  resetDemo,
-  ROLE_LABEL,
-  roleFromPosition,
   saveConfig,
   saveEmployee,
   saveShift,
-  activateShift,
 } from '../store'
 
 
@@ -27,49 +28,111 @@ const emptyEmployee = {
   name: '',
   username: '',
   position: 'Barista',
-  salary: 9500,
+  salary: '',
   password: '',
+  roleId: '',
   shiftId: null,
-  active: true,
 }
 
 export function AdminEmployees() {
   const actor = getUser()
-  const data = getState()
+  const [employees, setEmployees] = useState([])
+  const [roles, setRoles] = useState([])
+  const [shifts, setShifts] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
+  const [shiftError, setShiftError] = useState('')
+  const [loadAttempt, setLoadAttempt] = useState(0)
   const [form, setForm] = useState(null)
   const [toast, setToast] = useState(null)
   const [saving, setSaving] = useState(false)
+  const [changingId, setChangingId] = useState(null)
+
+  useEffect(() => {
+    let mounted = true
+    Promise.all([loadEmployees(), loadShifts()]).then(([directory, shiftResult]) => {
+      if (!mounted) return
+      setEmployees(directory.employees ?? [])
+      setRoles(directory.roles ?? [])
+      setShifts(shiftResult.shifts ?? [])
+      setLoadError(directory.ok ? '' : directory.message)
+      setShiftError(shiftResult.ok ? '' : shiftResult.message)
+      setLoading(false)
+    })
+    return () => { mounted = false }
+  }, [loadAttempt])
+
+  function retry() {
+    setLoading(true)
+    setLoadAttempt(attempt => attempt + 1)
+  }
+
+  function replaceEmployee(employee) {
+    setEmployees(current => [...current.filter(row => row.id !== employee.id), employee]
+      .sort((a, b) => a.name.localeCompare(b.name, 'es-MX') || a.id - b.id))
+  }
 
   async function submit(event) {
     event.preventDefault()
+    if (saving) return
+
     setSaving(true)
-    const result = await saveEmployee(
-      { ...form, role: roleFromPosition(form.position) },
-      actor.id,
-    )
-    setSaving(false)
-    setToast({ type: result.ok ? 'ok' : 'error', message: result.message })
-    if (result.ok) setForm(null)
+    try {
+      const result = await saveEmployee({ ...form, roleId: Number(form.roleId) })
+      setToast({ type: result.ok ? 'ok' : 'error', message: result.message })
+      if (result.ok) {
+        replaceEmployee(result.employee)
+        setForm(null)
+        if (result.employee.id === actor.id) await getCurrentUser()
+      }
+    } finally {
+      setSaving(false)
+    }
   }
+
+  async function toggleActive(employee) {
+    if (changingId !== null) return
+    if (employee.active && !window.confirm(`¿Deseas dar de baja a ${employee.name}?`)) return
+
+    setChangingId(employee.id)
+    try {
+      const result = await (employee.active ? deactivateEmployee(employee.id) : activateEmployee(employee.id))
+      setToast({ type: result.ok ? 'ok' : 'error', message: result.message })
+      if (result.ok) replaceEmployee(result.employee)
+    } finally {
+      setChangingId(null)
+    }
+  }
+
+  const canOpenForm = !loading && !loadError && !shiftError && roles.length > 0
 
   return (
     <div>
       <PageHeader
         kicker="Administración"
         title="Gestión de empleados"
-        subtitle="Altas, baja lógica (se conserva historial) y cambios de puesto, sueldo o contraseña."
+        subtitle="Gestiona las cuentas del personal, sus roles y turnos."
         actions={
-          <div className="flex flex-wrap gap-2">
-            <Button variant="ghost" onClick={async () => {
-              await resetDemo()
-              setToast({ type: 'ok', message: 'Se restauraron los datos de demostración.' })
-            }}>Restaurar demo</Button>
-            <Button onClick={() => setForm({ ...emptyEmployee, shiftId: data.shifts[0]?.id })}>Dar de alta</Button>
-          </div>
+          <Button
+            disabled={!canOpenForm || changingId !== null}
+            onClick={() => setForm({ ...emptyEmployee, roleId: roles.find(role => role.name === 'Empleado')?.id ?? '' })}
+          >
+            Dar de alta
+          </Button>
         }
       />
+      {loading ? <Card><p role="status">Cargando empleados…</p></Card> : null}
+      {!loading && (loadError || shiftError) ? (
+        <Card className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <p role="alert" className="text-sm text-berry">{loadError || shiftError}</p>
+          <Button variant="ghost" onClick={retry}>Reintentar</Button>
+        </Card>
+      ) : null}
+      {!loading && !loadError && employees.length === 0 ? (
+        <Card><p className="text-sm text-cocoa-soft">No hay empleados registrados.</p></Card>
+      ) : null}
       <div className="grid gap-3">
-        {data.users.map((user) => (
+        {!loading && !loadError && employees.map((user) => (
           <Card key={user.id} className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <div className="flex flex-wrap items-center gap-2">
@@ -78,25 +141,24 @@ export function AdminEmployees() {
                 {user.locked ? <Badge tone="warn">Bloqueado</Badge> : null}
               </div>
               <p className="text-sm text-cocoa-soft">
-                @{user.username} · {user.position} · {ROLE_LABEL[user.role]} · {money(user.salary)}
+                @{user.username} · {user.position} · {user.roleName}{user.salary === null ? '' : ` · ${money(user.salary)}`}
               </p>
+              <p className="text-sm text-cocoa-soft">Turno: {user.shiftName ?? 'Sin asignar'}</p>
             </div>
             <div className="flex gap-2">
-              <Button variant="ghost" onClick={() => setForm({
-                id: user.id,
-                name: user.name,
-                username: user.username,
-                position: user.position,
-                salary: user.salary,
-                password: '',
-                shiftId: user.shiftId,
-                active: user.active,
-              })}>Editar</Button>
-              {user.active && user.id !== actor.id ? (
-                <Button variant="danger" onClick={() => {
-                  const result = deactivateEmployee(user.id, actor.id)
-                  setToast({ type: 'ok', message: result.message })
-                }}>Baja</Button>
+              <Button
+                variant="ghost"
+                disabled={!canOpenForm || changingId !== null}
+                onClick={() => setForm({ ...user, password: '' })}
+              >Editar</Button>
+              {user.id !== actor.id ? (
+                <Button
+                  variant={user.active ? 'danger' : 'ghost'}
+                  disabled={changingId !== null}
+                  onClick={() => toggleActive(user)}
+                >
+                  {changingId === user.id ? 'Guardando…' : user.active ? 'Dar de baja' : 'Reactivar'}
+                </Button>
               ) : null}
             </div>
           </Card>
@@ -104,39 +166,49 @@ export function AdminEmployees() {
       </div>
 
       {form ? (
-        <Modal title={form.id ? 'Modificar personal' : 'Alta de empleado'} onClose={() => setForm(null)}>
-          <form className="space-y-3" onSubmit={submit}>
-            <Field label="Nombre completo">
-              <input className={inputClass} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-            </Field>
-            <Field label="Usuario">
-              <input className={inputClass} value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} />
-            </Field>
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Puesto">
-                <select className={inputClass} value={form.position} onChange={(e) => setForm({ ...form, position: e.target.value })}>
-                  {POSITIONS.map((p) => <option key={p}>{p}</option>)}
-                </select>
+        <Modal title={form.id ? 'Modificar personal' : 'Alta de empleado'} onClose={() => { if (!saving) setForm(null) }}>
+          <form onSubmit={submit}>
+            <fieldset className="space-y-3" disabled={saving}>
+              <Field label="Nombre completo">
+                <input className={inputClass} required maxLength={100} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
               </Field>
-              <Field label="Sueldo mensual">
-                <input type="number" className={inputClass} value={form.salary} onChange={(e) => setForm({ ...form, salary: e.target.value })} />
+              <Field label="Usuario">
+                <input className={inputClass} required maxLength={30} value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} />
               </Field>
-            </div>
-            <Field label="Turno">
-              <select className={inputClass} value={form.shiftId} onChange={(e) => setForm({ ...form, shiftId: e.target.value })}>
-                {data.shifts.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.start}-{s.end})</option>)}
-              </select>
-            </Field>
-            <Field label={form.id ? 'Nueva contraseña (opcional, mín. 8)' : 'Contraseña inicial (mín. 8)'}>
-              <input type="password" className={inputClass} value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
-            </Field>
-            {form.id ? (
-              <label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" checked={form.active} onChange={(e) => setForm({ ...form, active: e.target.checked })} />
-                Cuenta activa
-              </label>
-            ) : null}
-            <Button type="submit" className="w-full" disabled={saving}>{saving ? 'Guardando…' : 'Guardar'}</Button>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Puesto">
+                  <input className={inputClass} list="employee-positions" required maxLength={50} value={form.position} onChange={(e) => setForm({ ...form, position: e.target.value })} />
+                  <datalist id="employee-positions">
+                    {POSITIONS.map(position => <option key={position} value={position} />)}
+                  </datalist>
+                </Field>
+                <Field label="Sueldo mensual">
+                  <input type="number" className={inputClass} required min="0" max="99999999.99" step="0.01" value={form.salary} onChange={(e) => setForm({ ...form, salary: e.target.value })} />
+                </Field>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Rol">
+                  <select className={inputClass} required disabled={form.id === actor.id} value={form.roleId} onChange={(e) => setForm({ ...form, roleId: e.target.value })}>
+                    <option value="" disabled>Selecciona un rol</option>
+                    {roles.map(role => <option key={role.id} value={role.id}>{role.name}</option>)}
+                  </select>
+                </Field>
+                <Field label="Turno">
+                  <select className={inputClass} value={form.shiftId ?? ''} onChange={(e) => setForm({ ...form, shiftId: e.target.value ? Number(e.target.value) : null })}>
+                    <option value="">Sin asignar</option>
+                    {shifts.filter(shift => shift.active || shift.id === form.shiftId).map(shift => (
+                      <option key={shift.id} value={shift.id} disabled={!shift.active}>
+                        {shift.name} ({shift.start}–{shift.end}){shift.active ? '' : ' · inactivo'}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              </div>
+              <Field label={form.id ? 'Nueva contraseña (opcional, mín. 8)' : 'Contraseña inicial (mín. 8)'}>
+                <input type="password" autoComplete="new-password" className={inputClass} required={!form.id} minLength={8} maxLength={255} value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
+              </Field>
+              <Button type="submit" className="w-full" disabled={saving}>{saving ? 'Guardando…' : 'Guardar'}</Button>
+            </fieldset>
           </form>
         </Modal>
       ) : null}

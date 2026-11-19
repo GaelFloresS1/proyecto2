@@ -97,12 +97,11 @@ async function attendanceRequest(path, options = {}) {
 }
 
 
- // Comunicación con el módulo de turnos.
-async function shiftRequest(path, options = {}) {
+async function adminRequest(resource, label, path, options = {}) {
   let response
 
   try {
-    response = await fetch(`/api/shifts${path}`, {
+    response = await fetch(`/api/${resource}${path}`, {
       credentials: 'include',
       ...options,
       headers: {
@@ -113,22 +112,29 @@ async function shiftRequest(path, options = {}) {
   } catch {
     return {
       ok: false,
-      message: 'No se pudo conectar con el servidor de turnos.',
+      message: `No se pudo conectar con el servidor de ${label}.`,
     }
   }
 
   const data = await response.json().catch(() => ({}))
 
-  if (!response.ok || data.ok === false) {
+  if (!response.ok || data.ok !== true) {
     return {
       ok: false,
-      message: data.message || `Error de turnos (${response.status}).`,
+      message: data.message || `Error de ${label} (${response.status}).`,
     }
   }
 
   return { ...data, ok: true }
 }
 
+function shiftRequest(path, options) {
+  return adminRequest('shifts', 'turnos', path, options)
+}
+
+function employeeRequest(path, options) {
+  return adminRequest('employees', 'empleados', path, options)
+}
 
 // Convierte una fecha de MySQL al formato YYYY-MM-DD.
 function dbDateToISO(value) {
@@ -201,9 +207,9 @@ function mapEmployeeToUser(employee) {
     role: employee.role,
     position: employee.position,
 
+    shiftId: employee.shiftId ?? null,
     // Estos datos todavía no vienen en publicEmployee del backend.
     salary: 0,
-    shiftId: null,
     failedAttempts: 0,
     locked: false,
     active: true,
@@ -1143,154 +1149,24 @@ export function removeHoliday(id, actorId) {
   }
 }
 
-export async function saveEmployee(payload, actorId) {
-  const {
-    id,
-    name,
-    username,
-    position,
-    salary,
-    password,
-    shiftId,
-    role,
-    active,
-  } = payload
-
-  if (!name?.trim() || !username?.trim()) {
-    return {
-      ok: false,
-      message: 'Nombre y usuario son obligatorios.',
-    }
-  }
-
-  if (!id && (!password || password.length < 8)) {
-    return {
-      ok: false,
-      message: 'La contraseña inicial debe tener mínimo 8 caracteres.',
-    }
-  }
-
-  if (password && password.length < 8) {
-    return {
-      ok: false,
-      message: 'La contraseña debe tener mínimo 8 caracteres.',
-    }
-  }
-
-  const duplicate = state.users.find(
-    (u) =>
-      u.username.toLowerCase() === username.trim().toLowerCase() &&
-      u.id !== id,
-  )
-
-  if (duplicate) {
-    return {
-      ok: false,
-      message: 'Ese nombre de usuario ya está en uso. Elige otro.',
-    }
-  }
-
-  const passwordHash = password
-    ? await hashPassword(password)
-    : null
-
-  patch((draft) => {
-    if (id) {
-      const user = draft.users.find(
-        (u) => u.id === id,
-      )
-
-      const previous = `${user.name} | ${user.position} | $${user.salary}`
-
-      user.name = name.trim()
-      user.username = username.trim()
-      user.position = position
-      user.role = role
-      user.salary = Number(salary) || 0
-      user.shiftId = shiftId
-      user.active = active
-      user.updatedAt = new Date().toISOString()
-
-      if (passwordHash) {
-        user.passwordHash = passwordHash
-        user.locked = false
-        user.failedAttempts = 0
-      }
-
-      addAudit(draft, {
-        userId: actorId,
-        action: 'Modificar empleado',
-        entity: id,
-        previousValue: previous,
-        newValue: `${user.name} | ${user.position} | $${user.salary}`,
-      })
-    } else {
-      const newId = uid('usr')
-
-      draft.users.push({
-        id: newId,
-        username: username.trim(),
-        passwordHash,
-        name: name.trim(),
-        role,
-        position,
-        salary: Number(salary) || 0,
-        shiftId,
-        failedAttempts: 0,
-        locked: false,
-        active: true,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      })
-
-      addAudit(draft, {
-        userId: actorId,
-        action: 'Alta de empleado',
-        entity: newId,
-        previousValue: '',
-        newValue: name,
-      })
-    }
-
-    return draft
-  })
-
-  return {
-    ok: true,
-    message: id
-      ? 'Datos del personal actualizados.'
-      : 'Empleado dado de alta.',
-  }
+export function loadEmployees() {
+  return employeeRequest('')
 }
 
-export function deactivateEmployee(id, actorId) {
-  const user = getUser(id)
-
-  patch((draft) => {
-    const target = draft.users.find(
-      (u) => u.id === id,
-    )
-
-    target.active = false
-    target.updatedAt = new Date().toISOString()
-
-    addAudit(draft, {
-      userId: actorId,
-      action: 'Baja lógica de empleado',
-      entity: id,
-      previousValue: 'activo',
-      newValue: 'inactivo',
-    })
-
-    return draft
+export function saveEmployee({ id, name, username, position, salary, roleId, shiftId, password }) {
+  return employeeRequest(id ? `/${id}` : '', {
+    method: id ? 'PUT' : 'POST',
+    body: JSON.stringify({ name, username, position, salary, roleId, shiftId, password }),
   })
-
-  return {
-    ok: true,
-    message: `${user.name} queda inactivo. Se conserva su historial de asistencia.`,
-  }
 }
 
+export function deactivateEmployee(id) {
+  return employeeRequest(`/${id}/deactivate`, { method: 'PATCH' })
+}
+
+export function activateEmployee(id) {
+  return employeeRequest(`/${id}/activate`, { method: 'PATCH' })
+}
 
 
 export async function saveShift(payload, actorId) {
@@ -1683,12 +1559,4 @@ export function formatDateTime(value) {
     dateStyle: 'medium',
     timeStyle: 'short',
   })
-}
-
-export function roleFromPosition(position) {
-  if (position === 'Administrador') return ROLES.ADMIN
-  if (position === 'Recursos Humanos') return ROLES.RH
-  if (position === 'Supervisor de área') return ROLES.SUPERVISOR
-
-  return ROLES.EMPLEADO
 }

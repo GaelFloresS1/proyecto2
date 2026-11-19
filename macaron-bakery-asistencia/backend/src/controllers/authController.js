@@ -1,22 +1,5 @@
 import pool from '../config/database.js'
-
-function normalizeRole(value) {
-  const role = String(value || '').trim().toLowerCase()
-  if (['administrador', 'admin'].includes(role)) return 'administrador'
-  if (['rh', 'recursos humanos', 'recursos_humanos'].includes(role)) return 'rh'
-  if (['supervisor', 'supervisor de área', 'supervisor de area'].includes(role)) return 'supervisor'
-  return 'empleado'
-}
-
-function publicEmployee(row) {
-  return {
-    id: row.id_empleado,
-    username: row.usuario,
-    name: row.nombre_completo,
-    position: row.puesto,
-    role: normalizeRole(row.rol),
-  }
-}
+import { publicEmployee, refreshSessionEmployee } from '../middleware/requireAuth.js'
 
 export async function login(req, res, next) {
   try {
@@ -32,7 +15,7 @@ export async function login(req, res, next) {
 
     const [rows] = await pool.execute(
       `SELECT e.id_empleado, e.usuario, e.nombre_completo, e.contrasena,
-              e.puesto, e.activo, e.intentos_fallidos, e.bloqueado,
+              e.puesto, e.id_turno, e.activo, e.intentos_fallidos, e.bloqueado,
               r.nombre AS rol
          FROM empleado e
          INNER JOIN rol r ON r.id_rol = e.id_rol
@@ -101,11 +84,13 @@ export async function login(req, res, next) {
   }
 }
 
-export function currentUser(req, res) {
-  res.json({
-    ok: true,
-    employee: req.session.employee || null,
-  })
+export async function currentUser(req, res, next) {
+  try {
+    const employee = await refreshSessionEmployee(req)
+    res.json({ ok: true, employee })
+  } catch (error) {
+    next(error)
+  }
 }
 
 export function logout(req, res, next) {
