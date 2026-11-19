@@ -20,8 +20,10 @@ import {
   removeHoliday,
   REQUEST_LABEL,
   reviewRequest,
+  saveAttendanceReport,
   upsertHoliday,
 } from '../store'
+import HrReportHistory from './HrReportHistory'
 
 function monthRange() {
   const now = new Date()
@@ -278,6 +280,8 @@ export function HrReports() {
   const [saving, setSaving] = useState(false)
   const [attendance, setAttendance] = useState(null)
   const [requestResult, setRequestResult] = useState(null)
+  const [savingReport, setSavingReport] = useState(false)
+  const [savedReportId, setSavedReportId] = useState(null)
   const [toast, setToast] = useState(null)
 
   const rangeKey = `${from}/${to}/${userId}`
@@ -310,6 +314,24 @@ export function HrReports() {
       })
     return () => { active = false }
   }, [from, to, userId, validRange, rangeKey])
+
+  async function saveReport() {
+    if (!validRange || savingReport) return
+    setSavingReport(true)
+    try {
+      const result = await saveAttendanceReport({ from, to, userId })
+      if (!result.ok) {
+        setToast({ type: 'error', message: result.message })
+        return
+      }
+      setSavedReportId(result.reportId)
+      setToast({ type: 'ok', message: `Reporte de asistencia #${result.reportId} guardado en el historial.` })
+    } catch {
+      setToast({ type: 'error', message: 'No se pudo confirmar el guardado. Consulta el historial antes de reintentar.' })
+    } finally {
+      setSavingReport(false)
+    }
+  }
 
   function exportExcel() {
     const requestStatus = requestResult ? 'No disponible' : 'Consulta pendiente'
@@ -376,7 +398,12 @@ export function HrReports() {
         kicker="Reportes"
         title="Asistencia, puntualidad y apoyo a nómina"
         subtitle="El pago del período se estima a partir de las horas trabajadas y el sueldo mensual contratado."
-        actions={<Button onClick={exportExcel} disabled={!current?.ok}>Exportar Excel (.xlsx)</Button>}
+        actions={
+          <div className="flex flex-wrap gap-2">
+            <Button onClick={saveReport} disabled={!validRange || savingReport}>{savingReport ? 'Guardando…' : 'Guardar reporte'}</Button>
+            <Button variant="ghost" onClick={exportExcel} disabled={!current?.ok}>Exportar Excel (.xlsx)</Button>
+          </div>
+        }
       />
       <Card className="mb-5 grid gap-3 md:grid-cols-4">
         <Field label="Desde">
@@ -406,6 +433,8 @@ export function HrReports() {
           {requestResult ? 'Contadores de solicitudes no disponibles.' : 'Consultando solicitudes…'}
         </p>
       ) : null}
+
+      <HrReportHistory key={savedReportId} />
 
       <div className="space-y-5">
         {report.map((block) => (

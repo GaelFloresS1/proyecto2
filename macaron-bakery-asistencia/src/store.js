@@ -765,6 +765,20 @@ export async function loadAdjustableAttendance({ from, to, userId }) {
   return { ok: true, records: result.attendances.map(row => mapAttendanceRow(row)) }
 }
 
+export function saveAttendanceReport({ from, to, userId }) {
+  const body = { from, to }
+  if (userId) body.employeeId = Number(userId)
+  return adminRequest('reports', 'reportes', '', { method: 'POST', body: JSON.stringify(body) })
+}
+
+export function loadAttendanceReports(page) {
+  return adminRequest('reports', 'reportes', `?page=${page}`)
+}
+
+export function loadAttendanceReport(reportId) {
+  return adminRequest('reports', 'reportes', `/${encodeURIComponent(reportId)}`)
+}
+
 export async function adjustAttendance({ attendanceId, entryAt, exitAt, reason }) {
   const result = await attendanceRequest(`/adjustments/${encodeURIComponent(attendanceId)}`, {
     method: 'PATCH',

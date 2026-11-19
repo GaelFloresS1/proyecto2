@@ -71,7 +71,7 @@ export function publicAttendance({ entry, result, ...row }, clock) {
   }
 }
 
-async function databaseClock(connection) {
+export async function databaseClock(connection) {
   const [[clock]] = await connection.query('SELECT CAST(NOW() AS CHAR) AS local, UNIX_TIMESTAMP() AS epoch')
   return { local: clock.local, epoch: Number(clock.epoch) }
 }
@@ -132,6 +132,16 @@ function localDateTime(value) {
   return parts && parts[0] === value && validDate(parts[1]) ? `${parts[1]} ${parts[2]}${parts[4] ?? ':00'}` : null
 }
 
+export async function readAttendancePeriod(database, clock, { from, to, employeeId }) {
+  const [rows] = await database.execute(
+    `${attendanceSelect}
+      WHERE a.fecha BETWEEN ? AND ?${employeeId ? ' AND a.id_empleado = ?' : ''}
+      ORDER BY a.fecha DESC, a.id_asistencia DESC`,
+    employeeId ? [from, to, employeeId] : [from, to],
+  )
+  return rows.map(row => publicAttendance(decodeAttendance(row), clock))
+}
+
 export async function listAdjustableAttendance(req, res, next) {
   try {
     const { from, to, employeeId } = req.query
@@ -141,14 +151,8 @@ export async function listAdjustableAttendance(req, res, next) {
     const id = employeeId === undefined ? null : positiveId(employeeId)
     if (employeeId !== undefined && id === null) throw new AttendanceError(400, 'Selecciona un empleado válido.')
 
-    const clock = await databaseClock(pool)
-    const [rows] = await pool.execute(
-      `${attendanceSelect}
-        WHERE a.fecha BETWEEN ? AND ?${id ? ' AND a.id_empleado = ?' : ''}
-        ORDER BY a.fecha DESC, a.id_asistencia DESC`,
-      id ? [from, to, id] : [from, to],
-    )
-    res.json({ ok: true, attendances: rows.map(row => publicAttendance(decodeAttendance(row), clock)) })
+    const attendances = await readAttendancePeriod(pool, await databaseClock(pool), { from, to, employeeId: id })
+    res.json({ ok: true, attendances })
   } catch (error) {
     if (error instanceof AttendanceError) return res.status(error.status).json({ ok: false, message: error.message })
     next(error)
