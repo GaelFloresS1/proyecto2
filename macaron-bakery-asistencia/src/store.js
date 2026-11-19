@@ -809,9 +809,10 @@ export function buildReport({
   from,
   to,
   attendances = state.attendances,
+  requests,
 }) {
   const users = state.users.filter(
-(u) => (userId ? u.id === Number(userId) : u.role !== ROLES.ADMIN),
+    (u) => (userId ? u.id === Number(userId) : u.role !== ROLES.ADMIN),
   )
 
   return users.map((user) => {
@@ -822,9 +823,9 @@ export function buildReport({
         a.date <= to,
     )
 
-    const reqs = state.requests.filter(
+    const reqs = requests?.filter(
       (r) =>
-        r.userId === user.id &&
+        r.employeeId === user.id &&
         r.date >= from &&
         r.date <= to,
     )
@@ -847,19 +848,19 @@ export function buildReport({
       if (rec.checkIn) workedDays += 1
     })
 
-    const authorizedAbsences = reqs.filter(
+    const authorizedAbsences = reqs?.filter(
       (r) =>
         ['falta', 'permiso'].includes(r.type) &&
         r.status === 'aprobada',
-    ).length
+    ).length ?? null
 
-    const pending = reqs.filter(
+    const pending = reqs?.filter(
       (r) => r.status === 'pendiente',
-    ).length
+    ).length ?? null
 
-    const rejected = reqs.filter(
+    const rejected = reqs?.filter(
       (r) => r.status === 'rechazada',
-    ).length
+    ).length ?? null
 
     const pay = estimatePay(
       { normal, extra, holidayHours },

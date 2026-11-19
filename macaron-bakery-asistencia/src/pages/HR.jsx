@@ -277,12 +277,26 @@ export function HrReports() {
   const [editError, setEditError] = useState('')
   const [saving, setSaving] = useState(false)
   const [attendance, setAttendance] = useState(null)
+  const [requestResult, setRequestResult] = useState(null)
   const [toast, setToast] = useState(null)
 
   const rangeKey = `${from}/${to}/${userId}`
   const validRange = from && to && from <= to
   const current = attendance?.key === rangeKey ? attendance : null
-  const report = current?.ok ? buildReport({ userId, from, to, attendances: current.records }) : []
+  const requests = requestResult?.ok && Array.isArray(requestResult.requests) ? requestResult.requests : undefined
+  const report = current?.ok ? buildReport({ userId, from, to, attendances: current.records, requests }) : []
+
+  useEffect(() => {
+    let active = true
+    loadReviewRequests('todas')
+      .then(result => {
+        if (active) setRequestResult(result)
+      })
+      .catch(() => {
+        if (active) setRequestResult({ ok: false })
+      })
+    return () => { active = false }
+  }, [])
 
   useEffect(() => {
     if (!validRange) return
@@ -298,6 +312,7 @@ export function HrReports() {
   }, [from, to, userId, validRange, rangeKey])
 
   function exportExcel() {
+    const requestStatus = requestResult ? 'No disponible' : 'Consulta pendiente'
     const rows = report.map((block) => ({
       Empleado: block.user.name,
       Puesto: block.user.position,
@@ -307,7 +322,9 @@ export function HrReports() {
       'Horas extra': block.extra,
       'Horas festivas': block.holidayHours,
       Retardos: block.lateCount,
-      'Faltas/permisos autorizados': block.authorizedAbsences,
+      'Faltas/permisos autorizados': block.authorizedAbsences ?? requestStatus,
+      'Solicitudes pendientes': block.pending ?? requestStatus,
+      'Solicitudes rechazadas': block.rejected ?? requestStatus,
       'Pago estimado del período': block.pay ? Number(block.pay.total.toFixed(2)) : null,
     }))
     const sheet = XLSX.utils.json_to_sheet(rows)
@@ -384,6 +401,11 @@ export function HrReports() {
       {!validRange ? <p role="alert" className="text-sm text-berry">Selecciona un rango de fechas válido.</p> : null}
       {validRange && !current ? <p role="status" className="text-sm text-cocoa-soft">Cargando asistencias…</p> : null}
       {current?.ok === false ? <p role="alert" className="text-sm text-berry">{current.message}</p> : null}
+      {current?.ok && !requests ? (
+        <p role="status" className="mb-3 text-sm text-cocoa-soft">
+          {requestResult ? 'Contadores de solicitudes no disponibles.' : 'Consultando solicitudes…'}
+        </p>
+      ) : null}
 
       <div className="space-y-5">
         {report.map((block) => (
@@ -402,6 +424,13 @@ export function HrReports() {
                 <Stat label="Pago estimado del período" value={block.pay ? money(block.pay.total) : 'No disponible'} />
               </div>
             </div>
+            {requests ? (
+              <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-sm text-cocoa-soft">
+                <span>Faltas/permisos autorizados <strong>{block.authorizedAbsences}</strong></span>
+                <span>Solicitudes pendientes <strong>{block.pending}</strong></span>
+                <span>Solicitudes rechazadas <strong>{block.rejected}</strong></span>
+              </div>
+            ) : null}
             <div className="mt-4 overflow-x-auto">
               <table className="w-full min-w-[720px] text-left text-sm">
                 <thead className="text-xs uppercase tracking-wider text-cocoa-soft">
