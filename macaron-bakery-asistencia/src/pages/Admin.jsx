@@ -44,6 +44,7 @@ export function AdminEmployees() {
   const [shiftError, setShiftError] = useState('')
   const [loadAttempt, setLoadAttempt] = useState(0)
   const [form, setForm] = useState(null)
+  const [formError, setFormError] = useState('')
   const [toast, setToast] = useState(null)
   const [saving, setSaving] = useState(false)
   const [changingId, setChangingId] = useState(null)
@@ -57,7 +58,10 @@ export function AdminEmployees() {
       setShifts(shiftResult.shifts ?? [])
       setLoadError(directory.ok ? '' : directory.message)
       setShiftError(shiftResult.ok ? '' : shiftResult.message)
-      setLoading(false)
+    }).catch(() => {
+      if (mounted) setLoadError('No se pudo cargar la información del personal.')
+    }).finally(() => {
+      if (mounted) setLoading(false)
     })
     return () => { mounted = false }
   }, [loadAttempt])
@@ -72,22 +76,38 @@ export function AdminEmployees() {
       .sort((a, b) => a.name.localeCompare(b.name, 'es-MX') || a.id - b.id))
   }
 
+  function openForm(employee) {
+    setFormError('')
+    setForm({ ...employee, salary: employee.salary ?? '', password: '' })
+  }
+
   async function submit(event) {
     event.preventDefault()
     if (saving) return
 
     setSaving(true)
+    setFormError('')
+    setToast(null)
     try {
-      const result = await saveEmployee({ ...form, roleId: Number(form.roleId) })
-      setToast({ type: result.ok ? 'ok' : 'error', message: result.message })
-      if (result.ok) {
-        replaceEmployee(result.employee)
-        setForm(null)
-        if (result.employee.id === actor.id) await getCurrentUser()
+      const result = await saveEmployee({
+        ...form,
+        roleId: Number(form.roleId),
+        salary: form.id && form.salary === '' ? undefined : form.salary,
+      })
+      if (!result.ok) {
+        setFormError(result.message)
+        return
       }
+      replaceEmployee(result.employee)
+      setForm(null)
+      setToast({ type: 'ok', message: result.message })
+    } catch {
+      setFormError('No se pudo completar el guardado. Recarga el directorio si el problema persiste.')
+      return
     } finally {
       setSaving(false)
     }
+    if (form.id === actor.id) await getCurrentUser()
   }
 
   async function toggleActive(employee) {
@@ -99,6 +119,8 @@ export function AdminEmployees() {
       const result = await (employee.active ? deactivateEmployee(employee.id) : activateEmployee(employee.id))
       setToast({ type: result.ok ? 'ok' : 'error', message: result.message })
       if (result.ok) replaceEmployee(result.employee)
+    } catch {
+      setToast({ type: 'error', message: 'No se pudo cambiar el estado del empleado. Recarga el directorio para comprobarlo.' })
     } finally {
       setChangingId(null)
     }
@@ -115,7 +137,7 @@ export function AdminEmployees() {
         actions={
           <Button
             disabled={!canOpenForm || changingId !== null}
-            onClick={() => setForm({ ...emptyEmployee, roleId: roles.find(role => role.name === 'Empleado')?.id ?? '' })}
+            onClick={() => openForm({ ...emptyEmployee, roleId: roles.find(role => role.name === 'Empleado')?.id ?? '' })}
           >
             Dar de alta
           </Button>
@@ -149,7 +171,7 @@ export function AdminEmployees() {
               <Button
                 variant="ghost"
                 disabled={!canOpenForm || changingId !== null}
-                onClick={() => setForm({ ...user, password: '' })}
+                onClick={() => openForm({ ...user, salaryHidden: user.salary === null })}
               >Editar</Button>
               {user.id !== actor.id ? (
                 <Button
@@ -182,8 +204,8 @@ export function AdminEmployees() {
                     {POSITIONS.map(position => <option key={position} value={position} />)}
                   </datalist>
                 </Field>
-                <Field label="Sueldo mensual">
-                  <input type="number" className={inputClass} required min="0" max="99999999.99" step="0.01" value={form.salary} onChange={(e) => setForm({ ...form, salary: e.target.value })} />
+                <Field label={form.salaryHidden ? 'Nuevo sueldo mensual (opcional)' : 'Sueldo mensual'}>
+                  <input type="number" className={inputClass} required={!form.salaryHidden} min="0" max="99999999.99" step="0.01" value={form.salary} onChange={(e) => setForm({ ...form, salary: e.target.value })} />
                 </Field>
               </div>
               <div className="grid grid-cols-2 gap-3">
@@ -207,6 +229,7 @@ export function AdminEmployees() {
               <Field label={form.id ? 'Nueva contraseña (opcional, mín. 8)' : 'Contraseña inicial (mín. 8)'}>
                 <input type="password" autoComplete="new-password" className={inputClass} required={!form.id} minLength={8} maxLength={255} value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
               </Field>
+              {formError ? <p role="alert" className="text-sm text-berry">{formError}</p> : null}
               <Button type="submit" className="w-full" disabled={saving}>{saving ? 'Guardando…' : 'Guardar'}</Button>
             </fieldset>
           </form>

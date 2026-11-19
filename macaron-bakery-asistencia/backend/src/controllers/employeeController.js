@@ -2,6 +2,9 @@ import pool from '../config/database.js'
 import { normalizeRole } from '../middleware/requireAuth.js'
 import { hasPermission } from '../middleware/requirePermission.js'
 
+const salaryPermission = 'NOMINA_CONSULTAR'
+const employeeFields = new Set(['name', 'username', 'position', 'salary', 'roleId', 'shiftId', 'password'])
+
 const employeeSelect = `
   SELECT e.id_empleado AS id, e.nombre_completo AS name, e.usuario AS username,
          e.puesto AS position, e.sueldo_base AS salary, e.id_rol AS roleId,
@@ -11,18 +14,24 @@ const employeeSelect = `
     JOIN rol r ON r.id_rol = e.id_rol
     LEFT JOIN turno t ON t.id_turno = e.id_turno`
 
-function mapEmployee(row) {
-  return { ...row, active: Boolean(row.active), locked: Boolean(row.locked) }
+function mapEmployee(row, canSeeSalary) {
+  return {
+    ...row,
+    salary: canSeeSalary ? row.salary : null,
+    role: normalizeRole(row.roleName),
+    active: Boolean(row.active),
+    locked: Boolean(row.locked),
+  }
 }
 
 export async function listEmployees(req, res, next) {
   try {
-    const canSeeSalary = await hasPermission(req.session.employee.id, 'NOMINA_CONSULTAR')
+    const canSeeSalary = await hasPermission(req.session.employee.id, salaryPermission)
     const [employees] = await pool.execute(`${employeeSelect} ORDER BY e.nombre_completo, e.id_empleado`)
     const [roles] = await pool.execute('SELECT id_rol AS id, nombre AS name FROM rol ORDER BY id_rol')
     res.json({
       ok: true,
-      employees: employees.map(row => mapEmployee({ ...row, salary: canSeeSalary ? row.salary : null })),
+      employees: employees.map(row => mapEmployee(row, canSeeSalary)),
       roles,
     })
   } catch (error) {
@@ -43,20 +52,31 @@ function validId(value) {
 
 function readText(value, label, limit) {
   const text = typeof value === 'string' ? value.trim() : ''
-  if (!text || [...text].length > limit) {
+  if (!text || [...text].length > limit || /[\r\n\0]/.test(text)) {
     throw new EmployeeError(400, `${label} debe tener entre 1 y ${limit} caracteres.`)
   }
   return text
 }
 
+function isJsonObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
 function validateEmployee(body, isNew) {
-  const name = readText(body?.name, 'El nombre', 100)
-  const username = readText(body?.username, 'El usuario', 30)
-  const position = readText(body?.position, 'El puesto', 50)
+  if (!isJsonObject(body)) {
+    throw new EmployeeError(400, 'Envía los datos del empleado como un objeto JSON.')
+  }
+  if (Object.keys(body).some(key => !employeeFields.has(key))) {
+    throw new EmployeeError(400, 'El formulario contiene campos que esta operación no admite.')
+  }
+  const name = readText(body.name, 'El nombre', 100)
+  const username = readText(body.username, 'El usuario', 30)
+  const position = readText(body.position, 'El puesto', 50)
   const salary = typeof body.salary === 'number' ? String(body.salary) : body.salary
   const { roleId, shiftId, password = '' } = body
 
-  if (typeof salary !== 'string' || !/^\d{1,8}(?:\.\d{1,2})?$/.test(salary)) {
+  if ((isNew || salary !== undefined) &&
+      (typeof salary !== 'string' || !/^\d{1,8}(?:\.\d{1,2})?$/.test(salary) || salary !== salary.trim())) {
     throw new EmployeeError(400, 'Escribe un sueldo de 0 a 99999999.99 con hasta dos decimales.')
   }
   if (!validId(roleId) || (shiftId !== null && !validId(shiftId))) {
@@ -84,6 +104,10 @@ function employeeMutation(permission, mutate) {
   return async (req, res, next) => {
     let connection
     try {
+      const hasBody = Number(req.get('content-length')) > 0 || Boolean(req.get('transfer-encoding'))
+      if (hasBody && !req.is('application/json')) {
+        throw new EmployeeError(415, 'Envía los datos con el tipo de contenido application/json.')
+      }
       const actorId = req.session.employee.id
       const id = req.params.id === undefined ? null : Number(req.params.id)
       if (id !== null && (!/^\d+$/.test(req.params.id) || !validId(id))) {
@@ -114,12 +138,13 @@ function employeeMutation(permission, mutate) {
       }
 
       const result = await mutate({ req, connection, actorId, id, target, roleById, isAdmin })
+      const canSeeSalary = await hasPermission(actorId, salaryPermission, connection)
       const [employees] = await connection.execute(`${employeeSelect} WHERE e.id_empleado = ?`, [result.id])
       await connection.commit()
       res.status(id === null ? 201 : 200).json({
         ok: true,
         message: result.message,
-        employee: mapEmployee(employees[0]),
+        employee: mapEmployee(employees[0], canSeeSalary),
       })
     } catch (error) {
       if (connection) await connection.rollback()
@@ -150,7 +175,7 @@ async function saveEmployee({ req, connection, actorId, id, target, roleById, is
   }
   if (!target || target.id_turno !== shiftId) await ensureActiveShift(connection, shiftId)
 
-  const values = [name, username, position, salary, roleId, shiftId]
+  const values = [name, username, position, salary ?? null, roleId, shiftId]
   if (id === null) {
     const [result] = await connection.execute(
       `INSERT INTO empleado
@@ -164,7 +189,7 @@ async function saveEmployee({ req, connection, actorId, id, target, roleById, is
   const passwordUpdate = password ? ', contrasena = ?, bloqueado = 0, intentos_fallidos = 0' : ''
   await connection.execute(
     `UPDATE empleado
-        SET nombre_completo = ?, usuario = ?, puesto = ?, sueldo_base = ?, id_rol = ?, id_turno = ?,
+        SET nombre_completo = ?, usuario = ?, puesto = ?, sueldo_base = COALESCE(?, sueldo_base), id_rol = ?, id_turno = ?,
             fecha_ultima_modificacion = CURDATE()${passwordUpdate}
       WHERE id_empleado = ?`,
     [...values, ...(password ? [password] : []), id],
@@ -173,7 +198,10 @@ async function saveEmployee({ req, connection, actorId, id, target, roleById, is
 }
 
 function changeStatus(active) {
-  return async ({ connection, actorId, id, target }) => {
+  return async ({ req, connection, actorId, id, target }) => {
+    if (req.body !== undefined && (!isJsonObject(req.body) || Object.keys(req.body).length > 0)) {
+      throw new EmployeeError(400, 'El cambio de estado se indica en la ruta. Envía la solicitud sin datos.')
+    }
     if (!active && id === actorId) throw new EmployeeError(409, 'No puedes dar de baja tu propia cuenta.')
     if (Boolean(target.activo) !== active) {
       if (active) await ensureActiveShift(connection, target.id_turno)

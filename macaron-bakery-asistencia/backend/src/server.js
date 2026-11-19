@@ -58,6 +58,12 @@ app.use('/api/shifts', shiftRoutes)
 app.use('/api/employees', employeeRoutes)
 
 app.use((error, _req, res, _next) => {
+  if (error.type === 'entity.parse.failed') {
+    return res.status(400).json({ ok: false, message: 'El cuerpo de la solicitud debe contener JSON válido.' })
+  }
+  if (error.type === 'entity.too.large') {
+    return res.status(413).json({ ok: false, message: 'La solicitud excede el tamaño permitido.' })
+  }
   console.error(error)
   res.status(500).json({ ok: false, message: 'Ocurrió un error interno en el servidor.' })
 })

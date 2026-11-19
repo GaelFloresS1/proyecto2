@@ -1,7 +1,6 @@
 /**
- * Módulo de persistencia simulada (localStorage).
- * Sustituye a BD_M&B para este prototipo visual: empleados, turnos,
- * asistencia, solicitudes, festivos, ajustes de nómina y bitácora.
+ * Estado compartido del prototipo. Empleados, sesión y turnos provienen
+ * de MariaDB. Las funciones locales conservan su persistencia.
  */
 const KEY = 'macaron-bakery-nomina-v1'
 
@@ -30,6 +29,8 @@ export const POSITIONS = [
 
 const listeners = new Set()
 let state = null
+let bootstrapPromise
+let sessionVersion = 0
 
 // Comunicación con el backend. Vite redirige /api hacia Express.
 async function authRequest(path, options = {}) {
@@ -53,10 +54,10 @@ async function authRequest(path, options = {}) {
 
   const data = await response.json().catch(() => ({}))
 
-  if (!response.ok || data.ok === false) {
+  if (!response.ok || data?.ok !== true) {
     return {
       ok: false,
-      message: data.message || `Error de autenticación (${response.status}).`,
+      message: data?.message || `Error de autenticación (${response.status}).`,
     }
   }
 
@@ -118,10 +119,11 @@ async function adminRequest(resource, label, path, options = {}) {
 
   const data = await response.json().catch(() => ({}))
 
-  if (!response.ok || data.ok !== true) {
+  if (!response.ok || data?.ok !== true) {
     return {
       ok: false,
-      message: data.message || `Error de ${label} (${response.status}).`,
+      status: response.status,
+      message: data?.message || `Error de ${label} (${response.status}).`,
     }
   }
 
@@ -206,40 +208,27 @@ function mapEmployeeToUser(employee) {
     name: employee.name,
     role: employee.role,
     position: employee.position,
-
+    salary: employee.salary ?? null,
     shiftId: employee.shiftId ?? null,
-    // Estos datos todavía no vienen en publicEmployee del backend.
-    salary: 0,
-    failedAttempts: 0,
-    locked: false,
-    active: true,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+    locked: employee.locked ?? false,
+    active: employee.active ?? true,
   }
 }
 
-function applyAuthenticatedEmployee(employee) {
-  const user = mapEmployeeToUser(employee)
+function upsertUser(users, user) {
+  if (!users.some(item => item.id === user.id)) return [...users, user]
+  return users.map(item => item.id === user.id ? user : item)
+}
 
-  const existingIndex = state.users.findIndex(
-    (item) =>
-      String(item.id) === String(user.id) ||
-      item.username?.toLowerCase() === user.username?.toLowerCase(),
-  )
+function usersFromDirectory(employees, sessionUser) {
+  const users = employees.map(mapEmployeeToUser)
+  const current = users.find(user => user.id === sessionUser.id)
+  return upsertUser(users, current ? { ...current, salary: current.salary ?? sessionUser.salary } : sessionUser)
+}
 
-  if (existingIndex >= 0) {
-    state.users.splice(existingIndex, 1)
-  }
-
-  state.users.push(user)
-  state.sessionUserId = user.id
-
-  commit({
-    ...state,
-    users: [...state.users],
-  })
-
-  return user
+function clearSession() {
+  sessionVersion += 1
+  commit({ ...state, sessionUserId: null, users: [], shifts: [] })
 }
 
 export function getState() {
@@ -253,21 +242,17 @@ export function subscribe(listener) {
 
 function commit(next) {
   state = next
-  localStorage.setItem(KEY, JSON.stringify(state))
+  const { config, holidays, attendances, requests, auditLog } = next
+  try {
+    localStorage.setItem(KEY, JSON.stringify({ config, holidays, attendances, requests, auditLog }))
+  } catch {
+    // Un fallo de almacenamiento local no invalida el estado de la sesión en memoria.
+  }
   listeners.forEach((fn) => fn(state))
 }
 
 export function patch(updater) {
   commit(updater({ ...state }))
-}
-
-export async function hashPassword(password) {
-  const data = new TextEncoder().encode(password)
-  const buffer = await crypto.subtle.digest('SHA-256', data)
-
-  return [...new Uint8Array(buffer)]
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('')
 }
 
 export function localISO(date = new Date()) {
@@ -303,181 +288,11 @@ function uid(prefix) {
   return `${prefix}_${crypto.randomUUID().slice(0, 8)}`
 }
 
-async function seedUser({ username, password, ...rest }) {
-  return {
-    id: uid('usr'),
-    username,
-    passwordHash: await hashPassword(password),
-    failedAttempts: 0,
-    locked: false,
-    active: true,
-    createdAt: '2026-09-01T10:00:00',
-    updatedAt: '2026-09-01T10:00:00',
-    ...rest,
-  }
-}
-
-async function createSeed() {
-  const admin = await seedUser({
-    username: 'admin',
-    password: 'Admin123!',
-    name: 'Laura Méndez',
-    role: ROLES.ADMIN,
-    position: 'Administrador',
-    salary: 22000,
-    shiftId: 'shift_completo',
-  })
-
-  const rh = await seedUser({
-    username: 'rh',
-    password: 'Rh123456!',
-    name: 'Patricia Soto',
-    role: ROLES.RH,
-    position: 'Recursos Humanos',
-    salary: 18000,
-    shiftId: 'shift_matutino',
-  })
-
-  const supervisor = await seedUser({
-    username: 'supervisor',
-    password: 'Super123!',
-    name: 'Diego Navarro',
-    role: ROLES.SUPERVISOR,
-    position: 'Supervisor de área',
-    salary: 16000,
-    shiftId: 'shift_matutino',
-  })
-
-  const barista = await seedUser({
-    username: 'barista',
-    password: 'Barista1!',
-    name: 'Camila Reyes',
-    role: ROLES.EMPLEADO,
-    position: 'Barista',
-    salary: 9800,
-    shiftId: 'shift_matutino',
-  })
-
-  const cajero = await seedUser({
-    username: 'cajero',
-    password: 'Cajero12!',
-    name: 'Andrés Molina',
-    role: ROLES.EMPLEADO,
-    position: 'Cajero',
-    salary: 10200,
-    shiftId: 'shift_vespertino',
-  })
-
-  const capacitador = await seedUser({
-    username: 'capacitador',
-    password: 'Capacit1!',
-    name: 'Sofía Herrera',
-    role: ROLES.EMPLEADO,
-    position: 'Capacitador',
-    salary: 14000,
-    shiftId: 'shift_completo',
-  })
-
-  const baja = await seedUser({
-    username: 'martin',
-    password: 'Martin12!',
-    name: 'Martín Paz',
-    role: ROLES.EMPLEADO,
-    position: 'Barista',
-    salary: 9500,
-    shiftId: 'shift_matutino',
-    active: false,
-  })
-
-  const shifts = [
-    {
-      id: 'shift_matutino',
-      name: 'Matutino',
-      start: '07:00',
-      end: '15:00',
-      breakMinutes: 30,
-      weeklyDays: [1, 2, 3, 4, 5, 6],
-    },
-    {
-      id: 'shift_vespertino',
-      name: 'Vespertino',
-      start: '14:00',
-      end: '22:00',
-      breakMinutes: 30,
-      weeklyDays: [1, 2, 3, 4, 5, 6],
-    },
-    {
-      id: 'shift_completo',
-      name: 'Administrativo',
-      start: '09:00',
-      end: '18:00',
-      breakMinutes: 60,
-      weeklyDays: [1, 2, 3, 4, 5],
-    },
-  ]
-
-  const holidays = [
-    { id: uid('hol'), date: '2026-09-16', name: 'Día de la Independencia' },
-    { id: uid('hol'), date: '2026-11-02', name: 'Día de Muertos' },
-    { id: uid('hol'), date: '2026-12-25', name: 'Navidad' },
-    { id: uid('hol'), date: '2026-10-16', name: 'Aniversario Macaron & Bakery' },
-  ]
-
-  const attendances = [
-    attendance(barista.id, '2026-10-13', '07:02', '15:05', shifts[0]),
-    attendance(barista.id, '2026-10-14', '07:18', '15:01', shifts[0]),
-    attendance(barista.id, '2026-10-15', '06:58', '16:10', shifts[0]),
-    attendance(barista.id, '2026-10-16', '07:04', '15:00', shifts[0]),
-    attendance(barista.id, '2026-10-17', '07:41', '15:12', shifts[0]),
-    attendance(cajero.id, '2026-10-13', '14:00', '22:04', shifts[1]),
-    attendance(cajero.id, '2026-10-14', '14:22', '22:00', shifts[1]),
-    attendance(cajero.id, '2026-10-15', '13:55', '23:05', shifts[1]),
-    attendance(cajero.id, '2026-10-16', '14:03', '22:10', shifts[1]),
-    attendance(capacitador.id, '2026-10-13', '08:58', '18:02', shifts[2]),
-    attendance(capacitador.id, '2026-10-14', '09:00', '18:40', shifts[2]),
-    attendance(capacitador.id, '2026-10-15', '09:12', '18:05', shifts[2]),
-    attendance(supervisor.id, '2026-10-13', '06:50', '15:00', shifts[0]),
-    attendance(supervisor.id, '2026-10-14', '06:55', '15:20', shifts[0]),
-  ]
-
-  const requests = [
-    {
-      id: uid('req'),
-      userId: barista.id,
-      type: 'justificacion',
-      date: '2026-10-14',
-      reason: 'Retraso por cierre vial en Av. Universidad. Adjunto captura del reporte de tráfico.',
-      status: 'pendiente',
-      createdAt: '2026-10-14T07:25:00',
-      reviewerId: null,
-      reviewNote: '',
-    },
-    {
-      id: uid('req'),
-      userId: cajero.id,
-      type: 'permiso',
-      date: '2026-10-20',
-      reason: 'Cita médica de 16:00 a 18:00. Puedo cubrir apertura del turno.',
-      status: 'pendiente',
-      createdAt: '2026-10-18T11:10:00',
-      reviewerId: null,
-      reviewNote: '',
-    },
-    {
-      id: uid('req'),
-      userId: capacitador.id,
-      type: 'falta',
-      date: '2026-10-21',
-      reason: 'Capacitación externa de proveedores de harina en Monterrey.',
-      status: 'aprobada',
-      createdAt: '2026-10-10T09:00:00',
-      reviewerId: rh.id,
-      reviewNote: 'Autorizado. Se considera falta justificada.',
-    },
-  ]
-
+function createInitialState() {
   return {
     sessionUserId: null,
+    users: [],
+    shifts: [],
     config: {
       company: 'Macaron & Bakery',
       graceMinutes: 10,
@@ -485,90 +300,53 @@ async function createSeed() {
       holidayHourMultiplier: 2,
       monthlyHours: 192,
     },
-    users: [admin, rh, supervisor, barista, cajero, capacitador, baja],
-    shifts,
-    holidays,
-    attendances,
-    requests,
-    auditLog: [
-      {
-        id: uid('log'),
-        userId: rh.id,
-        action: 'Aprobación de falta',
-        entity: 'solicitud',
-        previousValue: 'pendiente',
-        newValue: 'aprobada',
-        at: '2026-10-10T09:40:00',
-      },
+    holidays: [
+      { id: uid('hol'), date: '2026-09-16', name: 'Día de la Independencia' },
+      { id: uid('hol'), date: '2026-11-02', name: 'Día de Muertos' },
+      { id: uid('hol'), date: '2026-12-25', name: 'Navidad' },
+      { id: uid('hol'), date: '2026-10-16', name: 'Aniversario Macaron & Bakery' },
     ],
+    attendances: [],
+    requests: [],
+    auditLog: [],
   }
 }
 
-function attendance(userId, date, checkIn, checkOut, shift) {
-  const lateMinutes = Math.max(
-    0,
-    minutesOf(checkIn) - minutesOf(shift.start) - 10,
-  )
-
-  return {
-    id: uid('att'),
-    userId,
-    date,
-    checkIn,
-    checkOut,
-    source: 'sistema',
-    late: lateMinutes > 0,
-    lateMinutes,
-    extraHoursOverride: null,
-    holidayHoursOverride: null,
-    notes: '',
-  }
+function withoutDemoUsers(items) {
+  return Array.isArray(items)
+    ? items.filter(item => item && !String(item.userId).startsWith('usr_'))
+    : []
 }
-export async function bootstrap() {
-  const raw = localStorage.getItem(KEY)
 
-  if (raw) {
-    try {
-      state = JSON.parse(raw)
-    } catch {
-      state = await createSeed()
-      localStorage.setItem(KEY, JSON.stringify(state))
+function readLocalState() {
+  const initial = createInitialState()
+  try {
+    const stored = JSON.parse(localStorage.getItem(KEY))
+    if (!stored) return initial
+    return {
+      ...initial,
+      config: { ...initial.config, ...stored.config },
+      holidays: Array.isArray(stored.holidays) ? stored.holidays : initial.holidays,
+      attendances: withoutDemoUsers(stored.attendances),
+      requests: withoutDemoUsers(stored.requests),
+      auditLog: withoutDemoUsers(stored.auditLog),
     }
-  } else {
-    state = await createSeed()
-    localStorage.setItem(KEY, JSON.stringify(state))
+  } catch {
+    return initial
   }
-
-  // La sesión válida proviene del backend, no de localStorage.
-  state.sessionUserId = null
-
-  const sessionResult = await authRequest('/me')
-
-  
-if (sessionResult.ok && sessionResult.employee) {
-  applyAuthenticatedEmployee(sessionResult.employee)
-
-  // Cargar los turnos reales desde MariaDB.
-  const shiftsResult = await loadShifts()
-
-  if (!shiftsResult.ok) {
-    console.error(shiftsResult.message)
-  }
-} else {
-  state.shifts = []
-  localStorage.setItem(KEY, JSON.stringify(state))
-  listeners.forEach((fn) => fn(state))
 }
 
-
+async function restoreSession() {
+  commit(readLocalState())
+  const version = sessionVersion
+  const result = await authRequest('/me')
+  if (version === sessionVersion && result.ok && result.employee) await openSession(result)
   return state
 }
 
-export async function resetDemo() {
-  localStorage.removeItem(KEY)
-  state = await createSeed()
-  localStorage.setItem(KEY, JSON.stringify(state))
-  listeners.forEach((fn) => fn(state))
+export function bootstrap() {
+  bootstrapPromise ??= restoreSession()
+  return bootstrapPromise
 }
 
 function addAudit(draft, {
@@ -599,29 +377,12 @@ export function getShift(shiftId) {
 
 
 export async function loadShifts() {
+  const version = sessionVersion
   const result = await shiftRequest('')
-
-  if (!result.ok) {
-    // Evita mostrar turnos de demostración como si fueran reales.
-    patch((draft) => {
-      draft.shifts = []
-      return draft
-    })
-
-    return result
-  }
-
-  patch((draft) => {
-    draft.shifts = result.shifts || []
-    return draft
-  })
-
-  return {
-    ok: true,
-    shifts: result.shifts || [],
-  }
+  const shifts = result.ok ? result.shifts ?? [] : []
+  if (version === sessionVersion) commit({ ...state, shifts })
+  return result.ok ? { ok: true, shifts } : result
 }
-
 
 export function isHoliday(date) {
   return state.holidays.some((h) => h.date === date)
@@ -680,171 +441,63 @@ export async function loadMyAttendance() {
 // AUTENTICACIÓN CON EL BACKEND
 // =====================================================
 
+async function openSession({ employee, canViewEmployees }) {
+  const version = ++sessionVersion
+  const user = mapEmployeeToUser(employee)
+  const [directory, shifts] = await Promise.all([
+    canViewEmployees ? requestEmployeeDirectory() : null,
+    shiftRequest(''),
+  ])
+
+  if (version !== sessionVersion) return null
+  if (shifts.status === 401 || directory?.status === 401) {
+    clearSession()
+    return null
+  }
+
+  commit({
+    ...state,
+    sessionUserId: user.id,
+    users: directory?.ok ? usersFromDirectory(directory.employees, user) : [user],
+    shifts: shifts.ok ? shifts.shifts ?? [] : [],
+  })
+  return getUser()
+}
+
 export async function login(username, password) {
   const result = await authRequest('/login', {
     method: 'POST',
     body: JSON.stringify({ username, password }),
   })
+  if (!result.ok) return result
 
-  if (!result.ok) {
-    return {
-      ok: false,
-      message: result.message,
-    }
-  }
-
-  if (!result.employee) {
-    return {
-      ok: false,
-      message: 'El servidor no devolvió los datos del empleado.',
-    }
-  }
-
-  
-  const user = applyAuthenticatedEmployee(result.employee)
-
-  const shiftsResult = await loadShifts()
-
-  if (!shiftsResult.ok) {
-  console.error('No se pudieron cargar los turnos:', shiftsResult.message)
-  }
-
-  return {
-  ok: true,
-  user,
-  }
-
+  if (!result.employee) return { ok: false, message: 'El servidor no devolvió los datos del empleado.' }
+  const user = await openSession(result)
+  if (!user) return { ok: false, message: 'La sesión no está disponible. Vuelve a iniciar sesión.' }
+  return { ok: true, user }
 }
 
 export async function getCurrentUser() {
+  const version = sessionVersion
   const result = await authRequest('/me')
-
-  if (!result.ok || !result.employee) {
-    if (state) {
-      state.sessionUserId = null
-      commit({ ...state })
-    }
-
+  if (version !== sessionVersion || !result.ok) return null
+  if (!result.employee) {
+    clearSession()
     return null
   }
+  if (getUser()?.id !== result.employee.id) return openSession(result)
 
-  return applyAuthenticatedEmployee(result.employee)
+  const user = mapEmployeeToUser(result.employee)
+  commit({
+    ...state,
+    users: result.canViewEmployees ? upsertUser(state.users, user) : [user],
+  })
+  return user
 }
 
 export async function logout() {
-  // Se limpia el estado local aunque el servidor no responda.
-  if (state) {
-    state.sessionUserId = null
-    commit({ ...state })
-  }
-
-  await authRequest('/logout', {
-    method: 'POST',
-  })
-}
-
-// =====================================================
-// RECUPERACIÓN SIMULADA DE CONTRASEÑA
-// Todavía no está conectada con MySQL.
-// =====================================================
-
-export async function startPasswordRecovery(username) {
-  const user = state.users.find(
-    (u) =>
-      u.username.toLowerCase() === username.trim().toLowerCase() &&
-      u.active,
-  )
-
-  if (!user) {
-    return {
-      ok: false,
-      message: 'No encontramos un usuario activo con ese nombre. Revisa la captura o acude con el administrador.',
-    }
-  }
-
-  const code = String(
-    Math.floor(100000 + Math.random() * 900000),
-  )
-
-  patch((draft) => {
-    const target = draft.users.find((u) => u.id === user.id)
-
-    target.recoveryCode = code
-    target.recoveryExpires = Date.now() + 15 * 60 * 1000
-
-    return draft
-  })
-
-  return {
-    ok: true,
-    code,
-    message: 'Código de recuperación generado (simulación de correo). Caduca en 15 minutos.',
-  }
-}
-
-export async function completePasswordRecovery({
-  username,
-  code,
-  password,
-}) {
-  if (!password || password.length < 8) {
-    return {
-      ok: false,
-      message: 'La nueva contraseña debe tener al menos 8 caracteres.',
-    }
-  }
-
-  const user = state.users.find(
-    (u) => u.username.toLowerCase() === username.trim().toLowerCase(),
-  )
-
-  if (!user?.recoveryCode) {
-    return {
-      ok: false,
-      message: 'Primero solicita un código de recuperación para este usuario.',
-    }
-  }
-
-  if (user.recoveryExpires < Date.now()) {
-    return {
-      ok: false,
-      message: 'El código caducó. Solicita uno nuevo.',
-    }
-  }
-
-  if (user.recoveryCode !== code.trim()) {
-    return {
-      ok: false,
-      message: 'El código no coincide. Revisa el número de 6 dígitos mostrado en la simulación.',
-    }
-  }
-
-  const passwordHash = await hashPassword(password)
-
-  patch((draft) => {
-    const target = draft.users.find((u) => u.id === user.id)
-
-    target.passwordHash = passwordHash
-    target.locked = false
-    target.failedAttempts = 0
-    target.recoveryCode = null
-    target.recoveryExpires = null
-
-    addAudit(draft, {
-      userId: user.id,
-      action: 'Recuperación de contraseña',
-      entity: 'usuario',
-      previousValue: 'bloqueado/olvidado',
-      newValue: 'contraseña restablecida',
-    })
-
-    return draft
-  })
-
-  return {
-    ok: true,
-    message: 'Contraseña actualizada. Ya puedes iniciar sesión.',
-  }
+  clearSession()
+  await authRequest('/logout', { method: 'POST' })
 }
 
 export function homePathFor(role) {
@@ -1149,23 +802,56 @@ export function removeHoliday(id, actorId) {
   }
 }
 
-export function loadEmployees() {
-  return employeeRequest('')
+async function requestEmployeeDirectory() {
+  const result = await employeeRequest('')
+  if (result.ok && (!Array.isArray(result.employees) || !Array.isArray(result.roles))) {
+    return { ok: false, message: 'El servidor devolvió un directorio incompleto.' }
+  }
+  return result
+}
+
+export async function loadEmployees() {
+  const version = sessionVersion
+  const result = await requestEmployeeDirectory()
+  const user = getUser()
+  if (version === sessionVersion && user) {
+    if (result.status === 401) clearSession()
+    else if (result.status === 403) commit({ ...state, users: [user] })
+    else if (result.ok) commit({ ...state, users: usersFromDirectory(result.employees, user) })
+  }
+  return result
+}
+
+async function employeeMutation(path, options) {
+  const version = sessionVersion
+  const result = await employeeRequest(path, options)
+  if (!result.ok) return result
+  if (!Number.isInteger(result.employee?.id)) {
+    return { ok: false, message: 'El servidor devolvió una respuesta incompleta. Recarga el directorio para comprobar el cambio.' }
+  }
+
+  const current = getUser()
+  if (version === sessionVersion && current) {
+    const user = mapEmployeeToUser(result.employee)
+    if (user.id === current.id && user.salary === null) user.salary = current.salary
+    commit({ ...state, users: upsertUser(state.users, user) })
+  }
+  return result
 }
 
 export function saveEmployee({ id, name, username, position, salary, roleId, shiftId, password }) {
-  return employeeRequest(id ? `/${id}` : '', {
+  return employeeMutation(id ? `/${id}` : '', {
     method: id ? 'PUT' : 'POST',
     body: JSON.stringify({ name, username, position, salary, roleId, shiftId, password }),
   })
 }
 
 export function deactivateEmployee(id) {
-  return employeeRequest(`/${id}/deactivate`, { method: 'PATCH' })
+  return employeeMutation(`/${id}/deactivate`, { method: 'PATCH' })
 }
 
 export function activateEmployee(id) {
-  return employeeRequest(`/${id}/activate`, { method: 'PATCH' })
+  return employeeMutation(`/${id}/activate`, { method: 'PATCH' })
 }
 
 
@@ -1445,6 +1131,7 @@ export function hourlyRate(user) {
 }
 
 export function estimatePay(calc, user) {
+  if (user.salary === null) return null
   const hour = hourlyRate(user)
 
   const normalPay = calc.normal * hour
@@ -1466,7 +1153,7 @@ export function buildReport({
   to,
 }) {
   const users = state.users.filter(
-    (u) => (userId ? u.id === userId : u.role !== ROLES.ADMIN),
+(u) => (userId ? u.id === Number(userId) : u.role !== ROLES.ADMIN),
   )
 
   return users.map((user) => {

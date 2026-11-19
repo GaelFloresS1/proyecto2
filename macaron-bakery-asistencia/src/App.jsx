@@ -2,7 +2,7 @@
  * Enrutamiento del prototipo Macaron & Bakery.
  * Cada rol aterriza en su menú; el administrador hereda RH y empleado.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useSyncExternalStore } from 'react'
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { AppShell } from './components'
 import { AdminEmployees, AdminShifts } from './pages/Admin'
@@ -18,33 +18,27 @@ function Guard({ roles, children }) {
   return children
 }
 
-function Boot({ children }) {
-  const [, setTick] = useState(0)
+function Boot({ initialized, children }) {
   const [ready, setReady] = useState(false)
 
   useEffect(() => {
     let active = true
 
-      bootstrap()
+    bootstrap()
       .then(() => {
-      if (active) setReady(true)
+        if (active) setReady(true)
       })
       .catch((error) => {
-      console.error('Error al iniciar la aplicación:', error)
-      if (active) setReady(true)
+        console.error('Error al iniciar la aplicación:', error)
+        if (active) setReady(true)
       })
 
-    const unsubscribe = subscribe(() => {
-    setTick((n) => n + 1)
-    })
-
     return () => {
-    active = false
-    unsubscribe()
+      active = false
     }
   }, [])
 
-  if (!ready || !getState()) {
+  if (!ready || !initialized) {
     return (
       <div className="bg-bakery grid min-h-screen place-items-center text-cocoa">
         <p className="font-display text-2xl">Preparando la sucursal…</p>
@@ -61,8 +55,10 @@ function GuestOnly({ children }) {
 }
 
 export default function App() {
+  const state = useSyncExternalStore(subscribe, getState)
+
   return (
-    <Boot>
+    <Boot initialized={state !== null}>
       <BrowserRouter>
         <Routes>
           <Route path="/" element={<GuestOnly><Login /></GuestOnly>} />

@@ -74,7 +74,9 @@ export function EmployeeClock() {
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <p className="text-sm text-cocoa-soft">Turno asignado</p>
-              <p className="font-display text-2xl text-cocoa">{shift?.name} · {shift?.start} a {shift?.end}</p>
+              <p className="font-display text-2xl text-cocoa">
+                {shift ? `${shift.name} · ${shift.start} a ${shift.end}` : user.shiftId === null ? 'Sin turno asignado' : 'Turno no disponible'}
+              </p>
               {isHoliday(today) ? (
                 <p className="mt-1 text-sm text-berry">Hoy es festivo: {holidayName(today)}. Las horas se pagan con tarifa festiva.</p>
               ) : null}

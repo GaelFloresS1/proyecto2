@@ -15,6 +15,7 @@ export function publicEmployee(row) {
     name: row.nombre_completo,
     position: row.puesto,
     role: normalizeRole(row.rol),
+    salary: row.sueldo_base,
     shiftId: row.id_turno,
   }
 }
@@ -24,7 +25,7 @@ export async function refreshSessionEmployee(req) {
   if (!employeeId) return null
 
   const [rows] = await pool.execute(
-    `SELECT e.id_empleado, e.usuario, e.nombre_completo, e.puesto, e.id_turno, r.nombre AS rol
+    `SELECT e.id_empleado, e.usuario, e.nombre_completo, e.puesto, e.sueldo_base, e.id_turno, r.nombre AS rol
        FROM empleado e
        INNER JOIN rol r ON r.id_rol = e.id_rol
       WHERE e.id_empleado = ? AND e.activo = 1 AND e.bloqueado = 0`,

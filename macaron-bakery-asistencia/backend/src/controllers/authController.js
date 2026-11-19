@@ -1,12 +1,13 @@
 import pool from '../config/database.js'
 import { publicEmployee, refreshSessionEmployee } from '../middleware/requireAuth.js'
+import { hasPermission } from '../middleware/requirePermission.js'
 
 export async function login(req, res, next) {
   try {
-    const username = String(req.body?.username || '').trim()
-    const password = String(req.body?.password || '')
+    const username = typeof req.body?.username === 'string' ? req.body.username.trim() : ''
+    const password = typeof req.body?.password === 'string' ? req.body.password : ''
 
-    if (!username || !password) {
+    if (!username || [...username].length > 30 || !password || [...password].length > 255) {
       return res.status(400).json({
         ok: false,
         message: 'Escribe tu usuario y contraseña.',
@@ -15,7 +16,7 @@ export async function login(req, res, next) {
 
     const [rows] = await pool.execute(
       `SELECT e.id_empleado, e.usuario, e.nombre_completo, e.contrasena,
-              e.puesto, e.id_turno, e.activo, e.intentos_fallidos, e.bloqueado,
+              e.puesto, e.sueldo_base, e.id_turno, e.activo, e.intentos_fallidos, e.bloqueado,
               r.nombre AS rol
          FROM empleado e
          INNER JOIN rol r ON r.id_rol = e.id_rol
@@ -72,11 +73,13 @@ export async function login(req, res, next) {
       [employee.id_empleado],
     )
 
+    const canViewEmployees = await hasPermission(employee.id_empleado, 'EMPLEADO_VER')
     req.session.employee = publicEmployee(employee)
 
     return res.json({
       ok: true,
       employee: req.session.employee,
+      canViewEmployees,
     })
 
   } catch (error) {
@@ -87,7 +90,8 @@ export async function login(req, res, next) {
 export async function currentUser(req, res, next) {
   try {
     const employee = await refreshSessionEmployee(req)
-    res.json({ ok: true, employee })
+    const canViewEmployees = employee ? await hasPermission(employee.id, 'EMPLEADO_VER') : false
+    res.json({ ok: true, employee, canViewEmployees })
   } catch (error) {
     next(error)
   }

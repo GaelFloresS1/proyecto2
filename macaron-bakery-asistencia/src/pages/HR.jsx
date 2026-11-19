@@ -2,14 +2,13 @@
  * Módulo de Recursos Humanos (el Administrador hereda estas pantallas).
  * Bandeja de permisos/faltas, calendario de festivos, reportes, Excel y bitácora.
  */
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import * as XLSX from 'xlsx'
 import { Badge, Button, Card, Field, inputClass, Modal, PageHeader, Toast } from '../components'
 import {
   adjustAttendance,
   buildReport,
   computeDay,
-  estimatePay,
   formatDateTime,
   getState,
   getUser,
@@ -164,7 +163,7 @@ export function HrReports() {
   const [edit, setEdit] = useState(null)
   const [toast, setToast] = useState(null)
 
-  const report = useMemo(() => buildReport({ userId: userId || null, from, to }), [data, userId, from, to])
+  const report = buildReport({ userId: userId || null, from, to })
 
   function exportExcel() {
     const rows = report.flatMap((block) => {
@@ -179,7 +178,7 @@ export function HrReports() {
           Retardos: block.lateCount,
           'Faltas/permisos autorizados': block.authorizedAbsences,
           'Sueldo base': block.user.salary,
-          'Importe estimado': Number(block.pay.total.toFixed(2)),
+          'Importe estimado': block.pay ? Number(block.pay.total.toFixed(2)) : null,
         }]
       }
       return [
@@ -193,7 +192,7 @@ export function HrReports() {
           Retardos: block.lateCount,
           'Faltas/permisos autorizados': block.authorizedAbsences,
           'Sueldo base': block.user.salary,
-          'Importe estimado': Number(block.pay.total.toFixed(2)),
+          'Importe estimado': block.pay ? Number(block.pay.total.toFixed(2)) : null,
         },
       ]
     })
@@ -245,13 +244,13 @@ export function HrReports() {
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <h2 className="font-display text-2xl text-cocoa">{block.user.name}</h2>
-                <p className="text-sm text-cocoa-soft">{block.user.position} · base {money(block.user.salary)}</p>
+                <p className="text-sm text-cocoa-soft">{block.user.position} · {block.user.salary === null ? 'Sueldo no disponible' : `base ${money(block.user.salary)}`}</p>
               </div>
               <div className="grid grid-cols-2 gap-2 text-right sm:grid-cols-4">
                 <Stat label="Normales" value={`${block.normal} h`} />
                 <Stat label="Extras" value={`${block.extra} h`} />
                 <Stat label="Festivas" value={`${block.holidayHours} h`} />
-                <Stat label="Estimado" value={money(block.pay.total)} />
+                <Stat label="Estimado" value={block.pay ? money(block.pay.total) : 'No disponible'} />
               </div>
             </div>
             <p className="mt-2 text-sm text-cocoa-soft">
@@ -273,7 +272,6 @@ export function HrReports() {
                 <tbody>
                   {block.records.map((rec) => {
                     const calc = computeDay(rec, block.user)
-                    const pay = estimatePay(calc, block.user)
                     return (
                       <tr key={rec.id} className="border-t border-cocoa/10">
                         <td className="py-2">
@@ -297,7 +295,6 @@ export function HrReports() {
                               checkIn: rec.checkIn || '',
                               checkOut: rec.checkOut || '',
                               notes: rec.notes || '',
-                              previewPay: pay.total,
                             })}
                           >
                             Ajustar
