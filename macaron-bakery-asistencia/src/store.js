@@ -1292,6 +1292,7 @@ export function deactivateEmployee(id, actorId) {
 }
 
 
+
 export async function saveShift(payload, actorId) {
   const {
     id,
@@ -1309,45 +1310,80 @@ export async function saveShift(payload, actorId) {
     }
   }
 
-  // La edición se conectará cuando tengamos PUT /api/shifts/:id.
-  if (id != null) {
-    return {
-      ok: false,
-      message: 'La edición de turnos todavía no está habilitada.',
-    }
-  }
+  const editing = id != null
 
-  const result = await shiftRequest('', {
-    method: 'POST',
-    body: JSON.stringify({
-      name: name.trim(),
-      start,
-      end,
-      breakMinutes: Number(breakMinutes),
-      weeklyDays,
-    }),
-  })
+  const result = await shiftRequest(
+    editing ? `/${id}` : '',
+    {
+      method: editing ? 'PUT' : 'POST',
+      body: JSON.stringify({
+        name: name.trim(),
+        start,
+        end,
+        breakMinutes: Number(breakMinutes),
+        weeklyDays,
+      }),
+    }
+  )
 
   if (!result.ok) {
     return result
   }
 
-  // Refrescamos la información desde MariaDB.
   const reloadResult = await loadShifts()
 
   if (!reloadResult.ok) {
     return {
-      ok: false,
-      message: 'El turno se guardó, pero no se pudo actualizar la lista. Recarga la página.',
+      ok: true,
+      message: 'Los cambios se guardaron en MariaDB, pero no se pudo actualizar la lista. Recarga la página.',
+      shift: result.shift,
     }
   }
 
   return {
     ok: true,
-    message: result.message || 'Turno registrado correctamente.',
+    message: result.message || (
+      editing
+        ? 'Turno actualizado correctamente.'
+        : 'Turno registrado correctamente.'
+    ),
     shift: result.shift,
   }
 }
+
+
+export async function deactivateShift(shiftId) {
+  if (!Number.isSafeInteger(Number(shiftId)) || Number(shiftId) <= 0) {
+    return {
+      ok: false,
+      message: 'El ID del turno no es válido.',
+    }
+  }
+
+  const result = await shiftRequest(
+    `/${shiftId}/deactivate`,
+    { method: 'PATCH' }
+  )
+
+  if (!result.ok) {
+    return result
+  }
+
+  const reloadResult = await loadShifts()
+
+  if (!reloadResult.ok) {
+    return {
+      ok: true,
+      message: 'El turno se desactivó, pero no se pudo actualizar la lista. Recarga la página.',
+    }
+  }
+
+  return {
+    ok: true,
+    message: result.message || 'Turno desactivado correctamente.',
+  }
+}
+
 
 
 export function saveConfig(partial, actorId) {

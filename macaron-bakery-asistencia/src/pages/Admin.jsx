@@ -7,6 +7,7 @@ import { useState } from 'react'
 import { Badge, Button, Card, Field, inputClass, Modal, PageHeader, Toast } from '../components'
 import {
   deactivateEmployee,
+  deactivateShift,
   getState,
   getUser,
   money,
@@ -19,6 +20,7 @@ import {
   saveShift,
 } from '../store'
 
+
 const emptyEmployee = {
   id: null,
   name: '',
@@ -26,7 +28,7 @@ const emptyEmployee = {
   position: 'Barista',
   salary: 9500,
   password: '',
-  shiftId: 'shift_matutino',
+  shiftId: null,
   active: true,
 }
 
@@ -157,18 +159,74 @@ export function AdminShifts() {
   const data = getState()
   const [form, setForm] = useState(null)
   const [toast, setToast] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const [deactivatingId, setDeactivatingId] = useState(null)
   const [rates, setRates] = useState({
     extraHourMultiplier: data.config.extraHourMultiplier,
     holidayHourMultiplier: data.config.holidayHourMultiplier,
     graceMinutes: data.config.graceMinutes,
   })
 
-  function submit(event) {
+  
+  async function submit(event) {
     event.preventDefault()
-    const result = saveShift(form, actor.id)
-    setToast({ type: result.ok ? 'ok' : 'error', message: result.message })
-    if (result.ok) setForm(null)
+
+    if (saving) return
+
+    setSaving(true)
+
+    try {
+      const result = await saveShift(form, actor.id)
+
+      setToast({
+        type: result.ok ? 'ok' : 'error',
+        message: result.message,
+      })
+
+      if (result.ok) {
+        setForm(null)
+      }
+    } catch (error) {
+      console.error('Error al guardar turno:', error)
+
+      setToast({
+        type: 'error',
+        message: 'Ocurrió un error al guardar el turno.',
+      })
+    } finally {
+      setSaving(false)
+    }
   }
+
+
+  async function handleDeactivate(shift) {
+    const confirmed = window.confirm(
+      `¿Deseas desactivar el turno "${shift.name}"?`
+    )
+
+    if (!confirmed) return
+
+    setDeactivatingId(shift.id)
+
+    try {
+      const result = await deactivateShift(shift.id)
+
+      setToast({
+        type: result.ok ? 'ok' : 'error',
+        message: result.message,
+      })
+    } catch (error) {
+      console.error('Error al desactivar turno:', error)
+
+      setToast({
+        type: 'error',
+        message: 'Ocurrió un error al desactivar el turno.',
+      })
+    } finally {
+      setDeactivatingId(null)
+    }
+  }
+
 
   function toggleDay(id) {
     const has = form.weeklyDays.includes(id)
@@ -201,7 +259,34 @@ export function AdminShifts() {
                     {shift.start} – {shift.end} · descanso {shift.breakMinutes} min · {shift.weeklyDays.map((d) => DAYS.find((x) => x.id === d)?.label).join(' ')}
                   </p>
                 </div>
-                <Button variant="ghost" onClick={() => setForm({ ...shift })}>Editar</Button>
+                
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge tone={shift.active ? 'ok' : 'bad'}>
+                      {shift.active ? 'Activo' : 'Inactivo'}
+                    </Badge>
+
+                    {shift.active && (
+                      <>
+                        <Button
+                          variant="ghost"
+                          onClick={() => setForm({ ...shift })}
+                        >
+                          Editar
+                        </Button>
+
+                        <Button
+                          variant="danger"
+                          disabled={deactivatingId === shift.id}
+                          onClick={() => handleDeactivate(shift)}
+                        >
+                          {deactivatingId === shift.id
+                            ? 'Desactivando…'
+                            : 'Desactivar'}
+                        </Button>
+                      </>
+                    )}
+                  </div>
+
               </article>
             ))}
           </div>
@@ -258,7 +343,13 @@ export function AdminShifts() {
                 ))}
               </div>
             </div>
-            <Button type="submit" className="w-full">Guardar turno</Button>
+            <Button
+              type="submit"
+              className="w-full"
+              disabled={saving}
+            >
+              {saving ? 'Guardando…' : 'Guardar turno'}
+            </Button>
           </form>
         </Modal>
       ) : null}

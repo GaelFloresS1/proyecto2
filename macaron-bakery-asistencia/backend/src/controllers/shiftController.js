@@ -158,3 +158,123 @@ export async function createShift(req, res, next) {
     next(error)
   }
 }
+
+
+ // PUT /api/shifts/:id
+export async function updateShift(req, res, next) {
+  try {
+    const shiftId = Number(req.params.id)
+
+    if (!Number.isSafeInteger(shiftId) || shiftId <= 0) {
+      return res.status(400).json({
+        ok: false,
+        message: 'El ID del turno no es válido.',
+      })
+    }
+
+    const validation = validateShift(req.body)
+
+    if (validation.error) {
+      return res.status(400).json({
+        ok: false,
+        message: validation.error,
+      })
+    }
+
+    const [existing] = await pool.execute(
+      'SELECT id_turno FROM turno WHERE id_turno = ?',
+      [shiftId]
+    )
+
+    if (existing.length === 0) {
+      return res.status(404).json({
+        ok: false,
+        message: 'No se encontró el turno.',
+      })
+    }
+
+    const shift = validation.data
+
+    await pool.execute(
+      `UPDATE turno
+       SET nombre = ?,
+           hora_inicio = ?,
+           hora_fin = ?,
+           horas_jornada = ?,
+           minutos_descanso = ?,
+           dias_laborales = ?
+       WHERE id_turno = ?`,
+      [
+        shift.name,
+        shift.start,
+        shift.end,
+        shift.hours,
+        shift.breakMinutes,
+        JSON.stringify(shift.weeklyDays),
+        shiftId,
+      ]
+    )
+
+    const [rows] = await pool.execute(
+      `SELECT id_turno, nombre, hora_inicio, hora_fin,
+              horas_jornada, minutos_descanso,
+              dias_laborales, activo
+       FROM turno
+       WHERE id_turno = ?`,
+      [shiftId]
+    )
+
+    res.json({
+      ok: true,
+      message: 'Turno actualizado correctamente.',
+      shift: mapShift(rows[0]),
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+// PATCH /api/shifts/:id/deactivate
+export async function deactivateShift(req, res, next) {
+  try {
+    const shiftId = Number(req.params.id)
+
+    if (!Number.isSafeInteger(shiftId) || shiftId <= 0) {
+      return res.status(400).json({
+        ok: false,
+        message: 'El ID del turno no es válido.',
+      })
+    }
+
+    const [existing] = await pool.execute(
+      'SELECT id_turno, activo FROM turno WHERE id_turno = ?',
+      [shiftId]
+    )
+
+    if (existing.length === 0) {
+      return res.status(404).json({
+        ok: false,
+        message: 'No se encontró el turno.',
+      })
+    }
+
+    if (!existing[0].activo) {
+      return res.status(409).json({
+        ok: false,
+        message: 'El turno ya está desactivado.',
+      })
+    }
+
+    await pool.execute(
+      'UPDATE turno SET activo = 0 WHERE id_turno = ?',
+      [shiftId]
+    )
+
+    res.json({
+      ok: true,
+      message: 'Turno desactivado correctamente.',
+    })
+  } catch (error) {
+    next(error)
+  }
+}
