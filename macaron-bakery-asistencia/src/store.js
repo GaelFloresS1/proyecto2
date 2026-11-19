@@ -31,6 +31,7 @@ const listeners = new Set()
 let state = null
 let bootstrapPromise
 let sessionVersion = 0
+let attendanceRevision = 0
 
 // Comunicación con el backend. Vite redirige /api hacia Express.
 async function authRequest(path, options = {}) {
@@ -172,34 +173,29 @@ function dbTimeToHM(value) {
 
 // Convierte un registro de MySQL al formato utilizado por React.
 function mapAttendanceRow(row, user) {
-  const checkIn = dbTimeToHM(row.fecha_hora_entrada)
-  const checkOut = dbTimeToHM(row.fecha_hora_salida)
-  const shift = getShift(user.shiftId)
-
-  const lateMinutes = shift && checkIn
-    ? Math.max(
-        0,
-        minutesOf(checkIn) -
-          minutesOf(shift.start) -
-          state.config.graceMinutes,
-      )
-    : 0
+  const entry = row.entrada_local ?? row.fecha_hora_entrada
+  const exit = row.salida_local ?? row.fecha_hora_salida
 
   return {
     id: row.id_asistencia,
     userId: user.id,
-    date: dbDateToISO(row.fecha),
-    checkIn,
-    checkOut,
+    date: row.fecha_local ?? dbDateToISO(row.fecha),
+    entryDate: dbDateToISO(entry),
+    exitDate: dbDateToISO(exit),
+    checkIn: dbTimeToHM(entry),
+    checkOut: dbTimeToHM(exit),
     source: 'sistema',
-    late: Boolean(row.retardo) || lateMinutes > 0,
-    lateMinutes,
-    extraHoursOverride: null,
-    holidayHoursOverride: null,
+    status: row.estado,
+    calculationStatus: row.estado_calculo,
+    normalHours: row.horas_normales,
+    extraHours: row.horas_extra,
+    holidayHours: row.horas_festiva,
+    late: Boolean(row.retardo),
+    lateMinutes: row.minutos_retardo ?? null,
+    graceMinutes: row.minutos_tolerancia ?? null,
     notes: '',
   }
 }
-
 
 function mapEmployeeToUser(employee) {
   return {
@@ -263,25 +259,8 @@ export function localISO(date = new Date()) {
   return `${y}-${m}-${d}`
 }
 
-export function formatTime(date = new Date()) {
-  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`
-}
-
 export function hm(date = new Date()) {
   return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
-}
-
-export function minutesOf(hhmm) {
-  const [h, m] = hhmm.split(':').map(Number)
-  return h * 60 + m
-}
-
-export function hoursBetween(startHm, endHm) {
-  let diff = minutesOf(endHm) - minutesOf(startHm)
-
-  if (diff < 0) diff += 24 * 60
-
-  return Math.round((diff / 60) * 100) / 100
 }
 
 function uid(prefix) {
@@ -399,43 +378,22 @@ export function holidayName(date) {
 
 export async function loadMyAttendance() {
   const user = getUser()
+  if (!user) return { ok: false, message: 'No hay un empleado con sesión activa.' }
 
-  if (!user) {
-    return {
-      ok: false,
-      message: 'No hay un empleado con sesión activa.',
-    }
-  }
-
+  const version = sessionVersion
+  const revision = attendanceRevision
   const result = await attendanceRequest('/history')
+  if (!result.ok) return result
 
-  if (!result.ok) {
-    return result
+  const records = (result.attendances || []).map(row => mapAttendanceRow(row, user))
+  if (version === sessionVersion && revision === attendanceRevision) {
+    patch(draft => ({
+      ...draft,
+      attendances: [...records, ...draft.attendances.filter(record => record.userId !== user.id)],
+    }))
   }
-
-  const records = (result.attendances || []).map((row) =>
-    mapAttendanceRow(row, user),
-  )
-
-  patch((draft) => {
-    // Eliminamos los registros simulados de este empleado.
-    draft.attendances = draft.attendances.filter(
-      (record) =>
-        String(record.userId) !== String(user.id),
-    )
-
-    // Incorporamos los registros obtenidos desde MySQL.
-    draft.attendances.push(...records)
-
-    return draft
-  })
-
-  return {
-    ok: true,
-    attendances: records,
-  }
+  return { ok: true, attendances: records }
 }
-
 
 // =====================================================
 // AUTENTICACIÓN CON EL BACKEND
@@ -517,112 +475,47 @@ export function canAccess(role, area) {
 }
 
 
-export async function clockIn(userId) {
+async function registerAttendance(userId, path) {
   const user = getUser(userId)
-
-  if (!user?.active) {
-    return {
-      ok: false,
-      message: 'No se puede registrar asistencia de una cuenta inactiva.',
-    }
+  if (!user?.active || user.id !== getUser()?.id) {
+    return { ok: false, message: 'El marcaje requiere una sesión activa del empleado.' }
   }
 
-  // Solicita al backend registrar la entrada.
-  const result = await attendanceRequest('/clock-in', {
-    method: 'POST',
-  })
+  const version = sessionVersion
+  const result = await attendanceRequest(path, { method: 'POST' })
+  if (!result.ok) return result
 
-  if (!result.ok) {
-    return result
-  }
-
-  // Convertimos la respuesta de MySQL.
   const record = mapAttendanceRow(result.attendance, user)
-
-  // Actualizamos la copia local para refrescar la interfaz.
-  patch((draft) => {
-    draft.attendances = draft.attendances.filter(
-      (a) =>
-        !(
-          String(a.userId) === String(userId) &&
-          a.date === record.date
-        ),
-    )
-
-    draft.attendances.unshift(record)
-
-    return draft
-  })
-
-  const now = new Date()
-  const holiday = isHoliday(record.date)
-
-  return {
-    ok: true,
-    late: record.late,
-    lateMinutes: record.lateMinutes,
-    checkIn: record.checkIn,
-    clock: formatTime(now),
-    holiday,
-    message: record.late
-      ? `Entrada registrada a las ${record.checkIn} (${record.lateMinutes} min de retardo).`
-      : `Entrada registrada a las ${record.checkIn} correctamente.`,
+  if (version === sessionVersion) {
+    attendanceRevision += 1
+    patch(draft => ({
+      ...draft,
+      attendances: [record, ...draft.attendances.filter(row => row.id !== record.id)],
+    }))
   }
+  return { ok: true, record, message: result.message }
 }
 
+export async function clockIn(userId) {
+  const result = await registerAttendance(userId, '/clock-in')
+  if (!result.ok) return result
 
+  const { checkIn, late, lateMinutes } = result.record
+  return {
+    ...result,
+    checkIn,
+    late,
+    lateMinutes,
+    message: late && lateMinutes !== null
+      ? `Entrada registrada a las ${checkIn} (${lateMinutes} min después de la tolerancia).`
+      : result.message,
+  }
+}
 
 export async function clockOut(userId) {
-  const user = getUser(userId)
-
-  if (!user?.active) {
-    return {
-      ok: false,
-      message: 'No se puede registrar asistencia de una cuenta inactiva.',
-    }
-  }
-
-  // Solicita al backend registrar la salida.
-  const result = await attendanceRequest('/clock-out', {
-    method: 'POST',
-  })
-
-  if (!result.ok) {
-    return result
-  }
-
-  const record = mapAttendanceRow(result.attendance, user)
-
-  // Actualizamos el registro local correspondiente.
-  patch((draft) => {
-    const index = draft.attendances.findIndex(
-      (a) =>
-        String(a.userId) === String(userId) &&
-        a.date === record.date,
-    )
-
-    if (index >= 0) {
-      draft.attendances[index] = {
-        ...draft.attendances[index],
-        ...record,
-      }
-    } else {
-      draft.attendances.unshift(record)
-    }
-
-    return draft
-  })
-
-  const now = new Date()
-
-  return {
-    ok: true,
-    checkOut: record.checkOut,
-    clock: formatTime(now),
-    message: `Salida registrada a las ${record.checkOut}. Las horas se calcularán automáticamente para nómina.`,
-  }
+  const result = await registerAttendance(userId, '/clock-out')
+  return result.ok ? { ...result, checkOut: result.record.checkOut } : result
 }
-
 
 export function createRequest({
   userId,
@@ -1024,6 +917,10 @@ export function adjustAttendance({
     }
   }
 
+  if (rec.source === 'sistema') {
+    return { ok: false, message: 'El ajuste de marcajes de MariaDB queda pendiente de un flujo autorizado.' }
+  }
+
   patch((draft) => {
     const target = draft.attendances.find(
       (a) => a.id === attendanceId,
@@ -1073,57 +970,13 @@ export function adjustAttendance({
   }
 }
 
-export function computeDay(record, user) {
-  const shift = getShift(user.shiftId)
-  const holiday = isHoliday(record.date)
-
-  if (!record.checkIn || !record.checkOut || !shift) {
-    return {
-      worked: 0,
-      normal: 0,
-      extra: 0,
-      holidayHours: 0,
-      holiday,
-    }
-  }
-
-  const raw = hoursBetween(record.checkIn, record.checkOut)
-  const breakH = (shift.breakMinutes || 0) / 60
-
-  const worked = Math.max(
-    0,
-    Math.round((raw - breakH) * 100) / 100,
-  )
-
-  const jornada = Math.max(
-    0,
-    hoursBetween(shift.start, shift.end) - breakH,
-  )
-
-  let extra = Math.max(
-    0,
-    Math.round((worked - jornada) * 100) / 100,
-  )
-
-  let holidayHours = holiday ? worked : 0
-  let normal = holiday ? 0 : Math.min(worked, jornada)
-
-  if (record.extraHoursOverride != null) {
-    extra = Number(record.extraHoursOverride)
-  }
-
-  if (record.holidayHoursOverride != null) {
-    holidayHours = Number(record.holidayHoursOverride)
-  }
-
-  return {
-    worked,
-    normal,
-    extra,
-    holidayHours,
-    holiday,
-    jornada,
-  }
+export function computeDay(record) {
+  // Las horas de MariaDB representan el turno que regía en el marcaje.
+  const available = record.status === 'cerrado' && ['calculado', 'historico'].includes(record.calculationStatus)
+  const normal = available ? Number(record.normalHours) : 0
+  const extra = available ? Number(record.extraHours) : 0
+  const holidayHours = available ? Number(record.holidayHours) : 0
+  return { worked: round2(normal + extra + holidayHours), normal, extra, holidayHours, holiday: holidayHours > 0 }
 }
 
 export function hourlyRate(user) {
@@ -1178,7 +1031,7 @@ export function buildReport({
     let workedDays = 0
 
     records.forEach((rec) => {
-      const calc = computeDay(rec, user)
+      const calc = computeDay(rec)
 
       if (rec.late) lateCount += 1
 

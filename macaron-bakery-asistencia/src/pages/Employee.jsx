@@ -1,6 +1,6 @@
 /**
  * Módulo del empleado (Barista, Cajero, Capacitador y también Supervisor).
- * - Registrar hora de entrada/salida con el reloj del sistema (no editable).
+ * - Registrar hora de entrada/salida con el reloj de MariaDB.
  * - Justificar retardo (extiende el marcaje de entrada).
  * - Solicitar permiso o falta.
  */
@@ -16,15 +16,28 @@ import {
   getShift,
   getState,
   getUser,
-  holidayName,
-  isHoliday,
   localISO,
 } from '../store'
+
+function attendanceBadge(record) {
+  if (!record) return { tone: 'neutral', label: 'Sin marcar' }
+  if (record.status === 'incompleto') return { tone: 'warn', label: 'Incompleto' }
+  if (record.calculationStatus === 'sin_turno') {
+    return { tone: 'warn', label: record.status === 'abierto' ? 'Abierto · sin turno' : 'Sin turno' }
+  }
+  if (record.status === 'abierto') return { tone: 'info', label: 'Abierto' }
+  if (record.calculationStatus === 'festivo_pendiente') return { tone: 'warn', label: 'Festivo pendiente' }
+  if (!['calculado', 'historico'].includes(record.calculationStatus)) {
+    return { tone: 'warn', label: 'Horas pendientes' }
+  }
+  return record.late ? { tone: 'warn', label: 'Retardo' } : { tone: 'ok', label: 'Jornada cerrada' }
+}
 
 export function EmployeeClock() {
   const user = getUser()
   const data = getState()
   const [toast, setToast] = useState(null)
+  const [marking, setMarking] = useState(false)
 
   useEffect(() => {
     loadMyAttendance().then((result) => {
@@ -39,27 +52,27 @@ export function EmployeeClock() {
 
   const today = localISO()
   const shift = getShift(user.shiftId)
-  const todayRec = data.attendances.find((a) => a.userId === user.id && a.date === today)
-  const history = data.attendances.filter((a) => a.userId === user.id).slice(0, 8)
+  const records = data.attendances.filter(record => record.userId === user.id)
+  const todayRec = records.find(record => record.status === 'abierto') ??
+    records.find(record => [record.date, record.entryDate, record.exitDate].includes(today))
+  const history = records.slice(0, 8)
+  const badge = attendanceBadge(todayRec)
 
-  
-
-  async function handleIn() {
-  const result = await clockIn(user.id)
-
-  setToast({
-    type: result.ok ? (result.late ? 'warn' : 'ok') : 'error',
-    message: result.message,
-  })
-  }
-
-  async function handleOut() {
-  const result = await clockOut(user.id)
-
-  setToast({
-    type: result.ok ? 'ok' : 'error',
-    message: result.message,
-  })
+  async function mark(register) {
+    if (marking) return
+    setMarking(true)
+    try {
+      const result = await register(user.id)
+      const pending = result.record?.status === 'cerrado' && result.record.calculationStatus !== 'calculado'
+      setToast({
+        type: result.ok ? (result.late || pending ? 'warn' : 'ok') : 'error',
+        message: result.message,
+      })
+    } catch {
+      setToast({ type: 'error', message: 'No se pudo completar el marcaje. Comprueba el historial antes de volver a intentar.' })
+    } finally {
+      setMarking(false)
+    }
   }
 
   return (
@@ -67,7 +80,7 @@ export function EmployeeClock() {
       <PageHeader
         kicker="Módulo empleado"
         title={`Hola, ${user.name.split(' ')[0]}`}
-        subtitle="Marca tu jornada en máximo tres pasos. La hora se toma del reloj del equipo y no puedes editarla."
+        subtitle="Registra tu entrada y salida con la hora de MariaDB."
       />
       <div className="grid gap-5 lg:grid-cols-3">
         <Card className="lg:col-span-2">
@@ -77,55 +90,57 @@ export function EmployeeClock() {
               <p className="font-display text-2xl text-cocoa">
                 {shift ? `${shift.name} · ${shift.start} a ${shift.end}` : user.shiftId === null ? 'Sin turno asignado' : 'Turno no disponible'}
               </p>
-              {isHoliday(today) ? (
-                <p className="mt-1 text-sm text-berry">Hoy es festivo: {holidayName(today)}. Las horas se pagan con tarifa festiva.</p>
-              ) : null}
             </div>
-            <Badge tone={todayRec?.checkOut ? 'ok' : todayRec?.checkIn ? 'info' : 'neutral'}>
-              {todayRec?.checkOut ? 'Jornada cerrada' : todayRec?.checkIn ? 'En turno' : 'Sin marcar'}
-            </Badge>
+            <Badge tone={badge.tone}>{badge.label}</Badge>
           </div>
           <div className="mt-6 grid gap-3 sm:grid-cols-2">
             <button
               type="button"
-              onClick={handleIn}
+              onClick={() => mark(clockIn)}
+              disabled={marking}
               className="rounded-3xl bg-cocoa p-5 text-left text-cream transition hover:bg-cocoa-soft"
             >
               <LogIn className="mb-3 h-6 w-6 text-macaron" />
               <p className="font-display text-2xl">Hora de entrada</p>
               <p className="mt-1 text-sm text-cream/70">Paso 1 de 1. Se guarda fecha y hora actuales.</p>
-              {todayRec?.checkIn ? <p className="mt-3 text-sm">Hoy: {todayRec.checkIn}</p> : null}
+              {todayRec?.checkIn ? <p className="mt-3 text-sm">Entrada: {todayRec.checkIn}</p> : null}
             </button>
             <button
               type="button"
-              onClick={handleOut}
+              onClick={() => mark(clockOut)}
+              disabled={marking}
               className="rounded-3xl bg-berry p-5 text-left text-white transition hover:bg-berry-dark"
             >
               <LogOut className="mb-3 h-6 w-6 text-macaron" />
               <p className="font-display text-2xl">Hora de salida</p>
               <p className="mt-1 text-sm text-white/80">Solo si ya existe una entrada sin cerrar.</p>
-              {todayRec?.checkOut ? <p className="mt-3 text-sm">Hoy: {todayRec.checkOut}</p> : null}
+              {todayRec?.checkOut ? <p className="mt-3 text-sm">Salida: {todayRec.checkOut}</p> : null}
             </button>
           </div>
           {todayRec?.late ? (
             <div className="mt-4 flex items-start gap-3 rounded-2xl bg-amber-50 px-4 py-3 text-sm text-amber-950">
               <AlertTriangle className="mt-0.5 h-4 w-4" />
-              Llegaste con {todayRec.lateMinutes} min de retardo (después de {data.config.graceMinutes} min de tolerancia). Justifícalo en la siguiente pantalla.
+              {todayRec.lateMinutes == null
+                ? 'Retardo registrado.'
+                : `${todayRec.lateMinutes} min de retardo después de ${todayRec.graceMinutes} min de tolerancia.`}
             </div>
           ) : null}
         </Card>
         <Card>
           <h2 className="font-display text-xl text-cocoa">Últimos marcajes</h2>
           <ul className="mt-4 space-y-3">
-            {history.map((row) => (
-              <li key={row.id} className="flex items-center justify-between rounded-2xl bg-cream px-3 py-2 text-sm">
-                <div>
-                  <p className="font-medium">{row.date}</p>
-                  <p className="text-cocoa-soft">{row.checkIn || '--'} → {row.checkOut || 'abierto'}</p>
-                </div>
-                {row.late ? <Badge tone="warn">Retardo</Badge> : <Badge tone="ok">A tiempo</Badge>}
-              </li>
-            ))}
+            {history.map((row) => {
+              const status = attendanceBadge(row)
+              return (
+                <li key={row.id} className="flex items-center justify-between gap-2 rounded-2xl bg-cream px-3 py-2 text-sm">
+                  <div>
+                    <p className="font-medium">{row.date}</p>
+                    <p className="text-cocoa-soft">{row.checkIn || '—'} → {row.checkOut || '—'}</p>
+                  </div>
+                  <Badge tone={status.tone}>{status.label}</Badge>
+                </li>
+              )
+            })}
           </ul>
         </Card>
       </div>
