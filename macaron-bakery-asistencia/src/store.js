@@ -519,6 +519,14 @@ export function createRequest({ type, date, exitTime, attendanceId, reason }) {
   })
 }
 
+export function loadAuditMovements({ from, to, actor, entity, action, page = 1 } = {}) {
+  const query = new URLSearchParams({ page })
+  for (const [key, value] of Object.entries({ from, to, actor, entity, action })) {
+    if (value) query.set(key, value)
+  }
+  return adminRequest('audit', 'bitácora', `?${query}`)
+}
+
 export function loadReviewRequests(status) {
   const query = new URLSearchParams({ status })
   return adminRequest('requests', 'solicitudes', `/review?${query}`)

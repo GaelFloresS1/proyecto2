@@ -12,6 +12,7 @@ import {
   formatDateTime,
   getState,
   loadAdjustableAttendance,
+  loadAuditMovements,
   loadHolidays,
   loadReviewRequests,
   localISO,
@@ -484,32 +485,104 @@ function Stat({ label, value }) {
   )
 }
 
+const auditActions = { ALTA: 'Alta', BAJA: 'Baja', CAMBIO: 'Cambio', CORRECCION: 'Corrección' }
+const auditEntities = {
+  empleado: 'Empleados',
+  turno: 'Turnos',
+  asistencia: 'Asistencias y ajustes',
+  festivo: 'Festivos',
+  solicitud_permiso: 'Permisos y solicitudes de falta',
+  justificante: 'Justificantes',
+  falta: 'Faltas',
+}
+
 export function HrAudit() {
-  const data = getState()
+  const [query, setQuery] = useState({ page: 1 })
+  const [result, setResult] = useState(null)
+  const current = result?.query === query ? result : null
+
+  useEffect(() => {
+    let active = true
+    loadAuditMovements(query).then(data => {
+      if (active) setResult({ query, ...data })
+    }).catch(() => {
+      if (active) setResult({ query, ok: false, message: 'No se pudo cargar la bitácora.' })
+    })
+    return () => { active = false }
+  }, [query])
+
+  function applyFilters(event) {
+    event.preventDefault()
+    setQuery({ ...Object.fromEntries(new FormData(event.currentTarget)), page: 1 })
+  }
+
   return (
     <div>
       <PageHeader
         kicker="Trazabilidad"
         title="Bitácora de cambios"
-        subtitle="RNF-009: usuario, fecha/hora y valor anterior de cada corrección a reportes, festivos o personal."
+        subtitle="Consulta los movimientos registrados y quién los realizó."
       />
       <Card>
+        <form className="mb-4 space-y-3" onSubmit={applyFilters} onReset={() => setQuery({ page: 1 })}>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+            <Field label="Desde"><input className={inputClass} type="date" name="from" /></Field>
+            <Field label="Hasta"><input className={inputClass} type="date" name="to" /></Field>
+            <Field label="Responsable"><input className={inputClass} name="actor" placeholder="Nombre o ID" maxLength={100} /></Field>
+            <Field label="Entidad">
+              <input className={inputClass} name="entity" list="audit-entities" maxLength={50} />
+              <datalist id="audit-entities">
+                {Object.entries(auditEntities).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </datalist>
+            </Field>
+            <Field label="Acción">
+              <select className={inputClass} name="action">
+                <option value="">Todas</option>
+                {Object.entries(auditActions).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </select>
+            </Field>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button type="submit">Filtrar</Button>
+            <Button type="reset" variant="ghost">Limpiar</Button>
+          </div>
+        </form>
+        {!current && <p role="status" className="text-sm text-cocoa-soft">Cargando movimientos…</p>}
+        {current?.ok === false && (
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p role="alert" className="text-sm text-berry">{current.message}</p>
+            {current.status !== 400 && current.status !== 403 && (
+              <Button variant="ghost" onClick={() => setQuery({ ...query })}>Reintentar</Button>
+            )}
+          </div>
+        )}
+        {current?.ok && current.movements.length === 0 && (
+          <p className="text-sm text-cocoa-soft">No hay movimientos en esta página.</p>
+        )}
         <div className="space-y-3">
-          {data.auditLog.map((row) => {
-            const who = data.users.find((u) => u.id === row.userId)
-            return (
-              <article key={row.id} className="rounded-2xl bg-cream p-4 text-sm">
-                <div className="flex flex-wrap justify-between gap-2">
-                  <p className="font-semibold text-cocoa">{row.action}</p>
-                  <span className="text-cocoa-soft">{formatDateTime(row.at)}</span>
-                </div>
-                <p className="mt-1 text-cocoa-soft">{who?.name || 'Sistema'} · {row.entity}</p>
-                <p className="mt-2"><span className="text-cocoa-soft">Antes:</span> {row.previousValue || '—'}</p>
-                <p><span className="text-cocoa-soft">Después:</span> {row.newValue}</p>
-              </article>
-            )
-          })}
+          {current?.ok && current.movements.map(row => (
+            <article key={row.id} className="break-words rounded-2xl bg-cream p-4 text-sm">
+              <div className="flex flex-wrap justify-between gap-2">
+                <p className="font-semibold text-cocoa">{auditActions[row.action] ?? row.action}</p>
+                <time dateTime={row.at} className="text-cocoa-soft">{formatDateTime(row.at)}</time>
+              </div>
+              <p className="mt-1 text-cocoa-soft">{row.employeeName ?? `Empleado #${row.employeeId}`} · {row.entity} #{row.recordId}</p>
+              <dl className="mt-2 space-y-1">
+                <div><dt className="inline text-cocoa-soft">Campo</dt><dd className="ml-2 inline">{row.field ?? '—'}</dd></div>
+                <div><dt className="inline text-cocoa-soft">Antes</dt><dd className="ml-2 inline">{row.previousValue ?? '—'}</dd></div>
+                <div><dt className="inline text-cocoa-soft">Después</dt><dd className="ml-2 inline">{row.newValue ?? '—'}</dd></div>
+                <div><dt className="inline text-cocoa-soft">Motivo</dt><dd className="ml-2 inline">{row.reason ?? '—'}</dd></div>
+              </dl>
+            </article>
+          ))}
         </div>
+        {current?.ok && (current.page > 1 || current.hasNext) && (
+          <nav aria-label="Páginas de bitácora" className="mt-4 flex flex-wrap items-center justify-between gap-2">
+            <Button variant="ghost" disabled={current.page === 1} onClick={() => setQuery({ ...query, page: current.page - 1 })}>Anterior</Button>
+            <span className="text-sm text-cocoa-soft">Página {current.page}</span>
+            <Button variant="ghost" disabled={!current.hasNext} onClick={() => setQuery({ ...query, page: current.page + 1 })}>Siguiente</Button>
+          </nav>
+        )}
       </Card>
     </div>
   )
