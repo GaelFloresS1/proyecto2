@@ -166,36 +166,18 @@ export function HrReports() {
   const report = buildReport({ userId: userId || null, from, to })
 
   function exportExcel() {
-    const rows = report.flatMap((block) => {
-      if (block.records.length === 0) {
-        return [{
-          Empleado: block.user.name,
-          Puesto: block.user.position,
-          Periodo: `${from} a ${to}`,
-          'Horas normales': block.normal,
-          'Horas extras': block.extra,
-          'Horas festivas': block.holidayHours,
-          Retardos: block.lateCount,
-          'Faltas/permisos autorizados': block.authorizedAbsences,
-          'Sueldo base': block.user.salary,
-          'Importe estimado': block.pay ? Number(block.pay.total.toFixed(2)) : null,
-        }]
-      }
-      return [
-        {
-          Empleado: block.user.name,
-          Puesto: block.user.position,
-          Periodo: `${from} a ${to}`,
-          'Horas normales': block.normal,
-          'Horas extras': block.extra,
-          'Horas festivas': block.holidayHours,
-          Retardos: block.lateCount,
-          'Faltas/permisos autorizados': block.authorizedAbsences,
-          'Sueldo base': block.user.salary,
-          'Importe estimado': block.pay ? Number(block.pay.total.toFixed(2)) : null,
-        },
-      ]
-    })
+    const rows = report.map((block) => ({
+      Empleado: block.user.name,
+      Puesto: block.user.position,
+      Periodo: `${from} a ${to}`,
+      'Sueldo mensual contratado': block.user.salary,
+      'Horas normales': block.normal,
+      'Horas extra': block.extra,
+      'Horas festivas': block.holidayHours,
+      Retardos: block.lateCount,
+      'Faltas/permisos autorizados': block.authorizedAbsences,
+      'Pago estimado del período': block.pay ? Number(block.pay.total.toFixed(2)) : null,
+    }))
     const sheet = XLSX.utils.json_to_sheet(rows)
     const book = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(book, sheet, 'Nomina')
@@ -215,7 +197,7 @@ export function HrReports() {
       <PageHeader
         kicker="Reportes"
         title="Asistencia, puntualidad y apoyo a nómina"
-        subtitle="No se conecta a bancos ni a contabilidad. El importe es una estimación interna a partir de horas y sueldo base."
+        subtitle="El pago del período se estima a partir de las horas trabajadas y el sueldo mensual contratado."
         actions={<Button onClick={exportExcel}>Exportar Excel (.xlsx)</Button>}
       />
       <Card className="mb-5 grid gap-3 md:grid-cols-4">
@@ -244,18 +226,17 @@ export function HrReports() {
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <h2 className="font-display text-2xl text-cocoa">{block.user.name}</h2>
-                <p className="text-sm text-cocoa-soft">{block.user.position} · {block.user.salary === null ? 'Sueldo no disponible' : `base ${money(block.user.salary)}`}</p>
+                <p className="text-sm text-cocoa-soft">
+                  {block.user.position} · Sueldo mensual contratado {block.user.salary === null ? 'no disponible' : money(block.user.salary)}
+                </p>
               </div>
               <div className="grid grid-cols-2 gap-2 text-right sm:grid-cols-4">
-                <Stat label="Normales" value={`${block.normal} h`} />
-                <Stat label="Extras" value={`${block.extra} h`} />
-                <Stat label="Festivas" value={`${block.holidayHours} h`} />
-                <Stat label="Estimado" value={block.pay ? money(block.pay.total) : 'No disponible'} />
+                <Stat label="Horas normales" value={`${block.normal} h`} />
+                <Stat label="Horas extra" value={`${block.extra} h`} />
+                <Stat label="Horas festivas" value={`${block.holidayHours} h`} />
+                <Stat label="Pago estimado del período" value={block.pay ? money(block.pay.total) : 'No disponible'} />
               </div>
             </div>
-            <p className="mt-2 text-sm text-cocoa-soft">
-              {block.workedDays} días con entrada · {block.lateCount} retardo(s) · {block.authorizedAbsences} falta/permiso autorizado(s)
-            </p>
             <div className="mt-4 overflow-x-auto">
               <table className="w-full min-w-[720px] text-left text-sm">
                 <thead className="text-xs uppercase tracking-wider text-cocoa-soft">

@@ -82,7 +82,13 @@ export function AdminEmployees() {
   }
 
   async function submit(event) {
+
+      console.log('PASO 1: Se ejecutó submit de empleados')
     event.preventDefault()
+  
+      console.log('PASO 2: Se intentará guardar el empleado')
+
+
     if (saving) return
 
     setSaving(true)
