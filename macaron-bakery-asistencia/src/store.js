@@ -192,6 +192,7 @@ function mapAttendanceRow(row, userId = row.id_empleado) {
     normalHours: row.horas_normales,
     extraHours: row.horas_extra,
     holidayHours: row.horas_festiva,
+    isHoliday: row.es_festivo === true,
     late: Boolean(row.retardo),
     lateMinutes: row.minutos_retardo ?? null,
     graceMinutes: row.minutos_tolerancia ?? null,
@@ -240,9 +241,9 @@ export function subscribe(listener) {
 
 function commit(next) {
   state = next
-  const { config, holidays, attendances, requests, auditLog } = next
+  const { config, attendances, requests, auditLog } = next
   try {
-    localStorage.setItem(KEY, JSON.stringify({ config, holidays, attendances, requests, auditLog }))
+    localStorage.setItem(KEY, JSON.stringify({ config, attendances, requests, auditLog }))
   } catch {
     // Un fallo de almacenamiento local no invalida el estado de la sesión en memoria.
   }
@@ -281,12 +282,6 @@ function createInitialState() {
       holidayHourMultiplier: 2,
       monthlyHours: 192,
     },
-    holidays: [
-      { id: uid('hol'), date: '2026-09-16', name: 'Día de la Independencia' },
-      { id: uid('hol'), date: '2026-11-02', name: 'Día de Muertos' },
-      { id: uid('hol'), date: '2026-12-25', name: 'Navidad' },
-      { id: uid('hol'), date: '2026-10-16', name: 'Aniversario Macaron & Bakery' },
-    ],
     attendances: [],
     requests: [],
     auditLog: [],
@@ -307,7 +302,6 @@ function readLocalState() {
     return {
       ...initial,
       config: { ...initial.config, ...stored.config },
-      holidays: Array.isArray(stored.holidays) ? stored.holidays : initial.holidays,
       attendances: withoutDemoUsers(stored.attendances),
       requests: withoutDemoUsers(stored.requests),
       auditLog: withoutDemoUsers(stored.auditLog),
@@ -364,15 +358,6 @@ export async function loadShifts() {
   if (version === sessionVersion) commit({ ...state, shifts })
   return result.ok ? { ok: true, shifts } : result
 }
-
-export function isHoliday(date) {
-  return state.holidays.some((h) => h.date === date)
-}
-
-export function holidayName(date) {
-  return state.holidays.find((h) => h.date === date)?.name
-}
-
 
 // =====================================================
 // ASISTENCIA CONECTADA A MYSQL
@@ -612,89 +597,19 @@ export function reviewRequest({
   }
 }
 
-export function upsertHoliday({
-  id,
-  date,
-  name,
-  actorId,
-}) {
-  if (!date || !name?.trim()) {
-    return {
-      ok: false,
-      message: 'Indica fecha y nombre del día festivo.',
-    }
-  }
-
-  patch((draft) => {
-    if (id) {
-      const current = draft.holidays.find(
-        (h) => h.id === id,
-      )
-
-      const previous = `${current.date} ${current.name}`
-
-      current.date = date
-      current.name = name.trim()
-
-      addAudit(draft, {
-        userId: actorId,
-        action: 'Editar día festivo',
-        entity: id,
-        previousValue: previous,
-        newValue: `${date} ${name}`,
-      })
-    } else {
-      const newId = uid('hol')
-
-      draft.holidays.push({
-        id: newId,
-        date,
-        name: name.trim(),
-      })
-
-      addAudit(draft, {
-        userId: actorId,
-        action: 'Alta de día festivo',
-        entity: newId,
-        previousValue: '',
-        newValue: `${date} ${name}`,
-      })
-    }
-
-    return draft
-  })
-
-  return {
-    ok: true,
-    message: 'Calendario de festivos actualizado.',
-  }
+export function loadHolidays() {
+  return adminRequest('holidays', 'festivos', '')
 }
 
-export function removeHoliday(id, actorId) {
-  const current = state.holidays.find(
-    (h) => h.id === id,
-  )
-
-  patch((draft) => {
-    draft.holidays = draft.holidays.filter(
-      (h) => h.id !== id,
-    )
-
-    addAudit(draft, {
-      userId: actorId,
-      action: 'Baja lógica de día festivo',
-      entity: id,
-      previousValue: `${current?.date} ${current?.name}`,
-      newValue: 'eliminado',
-    })
-
-    return draft
+export function upsertHoliday({ id, date, description }) {
+  return adminRequest('holidays', 'festivos', id ? `/${encodeURIComponent(id)}` : '', {
+    method: id ? 'PUT' : 'POST',
+    body: JSON.stringify({ date, description }),
   })
+}
 
-  return {
-    ok: true,
-    message: 'Festivo eliminado del calendario.',
-  }
+export function removeHoliday(id) {
+  return adminRequest('holidays', 'festivos', `/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
 async function requestEmployeeDirectory() {

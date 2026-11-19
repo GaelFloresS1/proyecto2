@@ -69,7 +69,7 @@ export default function App() {
               path="/rh/solicitudes"
               element={<Guard roles={[ROLES.ADMIN, ROLES.RH, ROLES.SUPERVISOR]}><HrInbox /></Guard>}
             />
-            <Route path="/rh/festivos" element={<Guard roles={[ROLES.ADMIN, ROLES.RH]}><HrHolidays /></Guard>} />
+            <Route path="/rh/festivos" element={<HrHolidays />} />
             <Route path="/rh/reportes" element={<Guard roles={[ROLES.ADMIN, ROLES.RH]}><HrReports /></Guard>} />
             <Route path="/rh/bitacora" element={<Guard roles={[ROLES.ADMIN, ROLES.RH]}><HrAudit /></Guard>} />
             <Route path="/admin/empleados" element={<Guard roles={[ROLES.ADMIN]}><AdminEmployees /></Guard>} />

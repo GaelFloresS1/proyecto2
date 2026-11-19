@@ -121,13 +121,14 @@ export function Badge({ children, tone = 'neutral' }) {
 }
 
 function navFor(role) {
+  const holidays = { to: '/rh/festivos', label: 'Días festivos', icon: CalendarDays }
   const employee = [
     { to: '/empleado', label: 'Mi jornada', icon: Clock3 },
     { to: '/empleado/solicitudes', label: 'Permisos y justificaciones', icon: ClipboardList },
   ]
   const rh = [
     { to: '/rh/solicitudes', label: 'Bandeja de solicitudes', icon: Bell },
-    { to: '/rh/festivos', label: 'Días festivos', icon: CalendarDays },
+    holidays,
     { to: '/rh/reportes', label: 'Reportes y nómina', icon: FileSpreadsheet },
     { to: '/rh/bitacora', label: 'Bitácora', icon: ScrollText },
   ]
@@ -137,8 +138,8 @@ function navFor(role) {
   ]
   if (role === ROLES.ADMIN) return [...admin, ...rh, ...employee]
   if (role === ROLES.RH) return [...rh, ...employee]
-  if (role === ROLES.SUPERVISOR) return [rh[0], ...employee]
-  return employee
+  if (role === ROLES.SUPERVISOR) return [rh[0], holidays, ...employee]
+  return [...employee, holidays]
 }
 
 export function AppShell() {

@@ -1,6 +1,7 @@
 import pool from '../config/database.js'
 import { hasPermission } from '../middleware/requirePermission.js'
 import { addDays, adjustmentContext, attendanceState, closeCalculation, entryContext, withLateness } from '../services/attendanceCalculation.js'
+import { validDate } from '../services/calendarDate.js'
 
 const defaultTolerance = 10 // Valor predeterminado de config_nomina y del prototipo.
 export const attendanceAdjustmentPermission = 'REPORTE_MODIFICAR'
@@ -64,6 +65,7 @@ export function publicAttendance({ entry, result, ...row }, clock) {
     ...hours,
     estado,
     estado_calculo: calculationStatus(estado, entry, result, Object.values(hours)),
+    es_festivo: result?.festivo === true || result?.status === 'festivo_pendiente' || hours.horas_festiva > 0,
     minutos_retardo: lateMinutes ?? null,
     minutos_tolerancia: entry?.tolerance ?? null,
   }
@@ -122,12 +124,6 @@ function positiveId(value) {
   if (typeof value !== 'string' || !/^\d+$/.test(value)) return null
   const id = Number(value)
   return id > 0 && id <= 2147483647 ? id : null
-}
-
-function validDate(value) {
-  if (typeof value !== 'string' || !/^[1-9]\d{3}-\d{2}-\d{2}$/.test(value)) return false
-  const date = new Date(`${value}T00:00:00Z`)
-  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value
 }
 
 function localDateTime(value) {
@@ -270,7 +266,7 @@ export const clockOut = recordAttendance(200, async ({ connection, employeeId, c
     throw new AttendanceError(409, 'La salida debe ser posterior a la entrada. Intenta de nuevo.')
   }
 
-  const hasHoliday = row.entry?.status === 'pendiente' && await hasHolidayDuring(connection, row.entrada_local, clock.local)
+  const hasHoliday = await hasHolidayDuring(connection, row.entrada_local, clock.local)
   const result = closeCalculation(row.entry, clock, hasHoliday)
   const [update] = await connection.execute(
     `UPDATE asistencia
@@ -285,6 +281,7 @@ export const clockOut = recordAttendance(200, async ({ connection, employeeId, c
 
   await logAttendance(connection, employeeId, row.id_asistencia, clock, 'CAMBIO', 'calculo_jornada', {
     status: result.status,
+    festivo: hasHoliday || undefined,
     elapsedSeconds: elapsed ?? undefined,
     workedSeconds: result.workedSeconds,
   })
@@ -325,6 +322,7 @@ function auditValues(row) {
     festivas: row.horas_festiva,
     status: row.estado_calculo,
     lateMinutes: row.minutos_retardo,
+    festivo: row.es_festivo || undefined,
   }
 }
 
@@ -380,7 +378,7 @@ export async function adjustAttendance(req, res, next) {
     )
     if (duplicate) throw new AttendanceError(409, 'Ya existe una asistencia para ese empleado y fecha.')
 
-    const holiday = context?.status === 'pendiente' && await hasHolidayDuring(connection, entryAt, exitAt)
+    const holiday = await hasHolidayDuring(connection, entryAt, exitAt)
     const computed = closeCalculation(context, { local: exitAt, epoch: exitedAt }, holiday)
     const status = !context && row.entry?.status === 'pendiente' ? 'fecha_sin_contexto' : computed.status
     const lateMinutes = context?.startsAt && Number.isInteger(context.tolerance) && context.tolerance >= 0
@@ -396,6 +394,7 @@ export async function adjustAttendance(req, res, next) {
       horas_festiva: computed.holiday ?? 0,
       estado_calculo: status,
       minutos_retardo: lateMinutes,
+      es_festivo: holiday,
     }
     await connection.execute(
       `UPDATE asistencia

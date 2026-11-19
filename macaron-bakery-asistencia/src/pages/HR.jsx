@@ -12,8 +12,8 @@ import {
   formatDateTime,
   getState,
   getUser,
-  holidayName,
   loadAdjustableAttendance,
+  loadHolidays,
   localISO,
   money,
   removeHoliday,
@@ -100,53 +100,121 @@ export function HrInbox() {
   )
 }
 
+const emptyHoliday = { id: null, date: '', description: '' }
+
 export function HrHolidays() {
-  const actor = getUser()
-  const data = getState()
-  const [form, setForm] = useState({ date: '', name: '' })
+  const [form, setForm] = useState(emptyHoliday)
+  const [calendar, setCalendar] = useState(null)
+  const [loadAttempt, setLoadAttempt] = useState(0)
+  const [pending, setPending] = useState(false)
   const [toast, setToast] = useState(null)
 
-  function save(event) {
-    event.preventDefault()
-    const result = upsertHoliday({ ...form, actorId: actor.id })
-    setToast({ type: result.ok ? 'ok' : 'error', message: result.message })
-    if (result.ok) setForm({ date: '', name: '' })
+  useEffect(() => {
+    let active = true
+    loadHolidays().then(result => {
+      if (active) setCalendar(result)
+    }).catch(() => {
+      if (active) setCalendar({ ok: false, message: 'No se pudo cargar el calendario.' })
+    })
+    return () => { active = false }
+  }, [loadAttempt])
+
+  function replaceHoliday(holiday, remove = false) {
+    setCalendar(current => {
+      const holidays = current.holidays.filter(row => row.id !== holiday.id)
+      if (!remove) holidays.push(holiday)
+      return { ...current, holidays: holidays.sort((a, b) => a.date.localeCompare(b.date)) }
+    })
   }
+
+  async function save(event) {
+    event.preventDefault()
+    if (pending) return
+    setPending(true)
+    try {
+      const result = await upsertHoliday(form)
+      setToast({ type: result.ok ? 'ok' : 'error', message: result.message })
+      if (result.ok) {
+        replaceHoliday(result.holiday)
+        setForm(emptyHoliday)
+      }
+    } finally {
+      setPending(false)
+    }
+  }
+
+  async function remove(holiday) {
+    if (pending || !window.confirm(`¿Eliminar el día festivo «${holiday.description}»?`)) return
+    setPending(true)
+    try {
+      const result = await removeHoliday(holiday.id)
+      setToast({ type: result.ok ? 'ok' : 'error', message: result.message })
+      if (result.ok) {
+        replaceHoliday(result.holiday, true)
+        if (form.id === holiday.id) setForm(emptyHoliday)
+      }
+    } finally {
+      setPending(false)
+    }
+  }
+
+  const canManage = calendar?.canManage === true
 
   return (
     <div>
       <PageHeader
         kicker="Calendario"
         title="Días festivos"
-        subtitle="Estos días alimentan el cálculo de horas festivas (incluido por el reporte de nómina)."
+        subtitle="Asistencia usa estas fechas para identificar las jornadas que coinciden con un festivo."
       />
-      <div className="grid gap-5 lg:grid-cols-2">
+      <div className={canManage ? 'grid gap-5 lg:grid-cols-2' : 'grid gap-5'}>
+        {canManage ? (
+          <Card>
+            <form className="space-y-4" onSubmit={save}>
+              <Field label="Fecha">
+                <input type="date" className={inputClass} value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} required disabled={pending} />
+              </Field>
+              <Field label="Descripción">
+                <input className={inputClass} value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} placeholder="Ej. Día de Muertos" maxLength={100} required disabled={pending} />
+              </Field>
+              <div className="flex flex-wrap gap-2">
+                <Button type="submit" disabled={pending}>{form.id ? 'Guardar cambios' : 'Agregar al calendario'}</Button>
+                {form.id ? <Button variant="ghost" onClick={() => setForm(emptyHoliday)} disabled={pending}>Cancelar</Button> : null}
+              </div>
+            </form>
+          </Card>
+        ) : null}
         <Card>
-          <form className="space-y-4" onSubmit={save}>
-            <Field label="Fecha">
-              <input type="date" className={inputClass} value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} />
-            </Field>
-            <Field label="Nombre">
-              <input className={inputClass} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Ej. Día de Muertos" />
-            </Field>
-            <Button type="submit">Agregar al calendario</Button>
-          </form>
-        </Card>
-        <Card>
-          <ul className="space-y-3">
-            {[...data.holidays].sort((a, b) => a.date.localeCompare(b.date)).map((h) => (
-              <li key={h.id} className="flex items-center justify-between rounded-2xl bg-cream px-3 py-2">
-                <div>
-                  <p className="font-medium">{h.name}</p>
-                  <p className="text-sm text-cocoa-soft">{h.date}</p>
-                </div>
-                <Button variant="danger" onClick={() => {
-                  const result = removeHoliday(h.id, actor.id)
-                  setToast({ type: 'ok', message: result.message })
-                }}>Quitar</Button>
-              </li>
-            ))}
-          </ul>
+          {!calendar ? <p role="status" className="text-sm text-cocoa-soft">Cargando festivos…</p> : null}
+          {calendar?.ok === false ? (
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p role="alert" className="text-sm text-berry">{calendar.message}</p>
+              <Button variant="ghost" onClick={() => {
+                setCalendar(null)
+                setLoadAttempt(attempt => attempt + 1)
+              }}>Reintentar</Button>
+            </div>
+          ) : null}
+          {calendar?.ok ? (
+            calendar.holidays.length ? (
+              <ul className="space-y-3">
+                {calendar.holidays.map(holiday => (
+                  <li key={holiday.id} className="flex flex-wrap items-center justify-between gap-2 rounded-2xl bg-cream px-3 py-2">
+                    <div>
+                      <p className="font-medium">{holiday.description}</p>
+                      <p className="text-sm text-cocoa-soft">{holiday.date}</p>
+                    </div>
+                    {canManage ? (
+                      <div className="flex gap-2">
+                        <Button variant="ghost" onClick={() => setForm(holiday)} disabled={pending}>Editar</Button>
+                        <Button variant="danger" onClick={() => remove(holiday)} disabled={pending}>Eliminar</Button>
+                      </div>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            ) : <p className="text-sm text-cocoa-soft">No hay días festivos registrados.</p>
+          ) : null}
         </Card>
       </div>
       <Toast toast={toast} onClose={() => setToast(null)} />
@@ -310,7 +378,7 @@ export function HrReports() {
                       <tr key={rec.id} className="border-t border-cocoa/10">
                         <td className="py-2">
                           {rec.date}
-                          {calc.holiday ? <span className="ml-2 text-xs text-berry">{holidayName(rec.date)}</span> : null}
+                          {rec.isHoliday || calc.holiday ? <span className="ml-2 text-xs text-berry">Coincide con festivo</span> : null}
                           {rec.late ? <span className="ml-2 text-xs text-amber-700">retardo{rec.lateMinutes == null ? '' : ` ${rec.lateMinutes}’`}</span> : null}
                           {pending ? <span className="ml-2 text-xs text-amber-700">{rec.status === 'abierto' ? 'Jornada abierta' : 'Horas por revisar'}</span> : null}
                         </td>
