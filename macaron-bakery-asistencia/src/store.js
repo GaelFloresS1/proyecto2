@@ -241,9 +241,9 @@ export function subscribe(listener) {
 
 function commit(next) {
   state = next
-  const { config, attendances, requests, auditLog } = next
+  const { config, attendances, auditLog } = next
   try {
-    localStorage.setItem(KEY, JSON.stringify({ config, attendances, requests, auditLog }))
+    localStorage.setItem(KEY, JSON.stringify({ config, attendances, auditLog }))
   } catch {
     // Un fallo de almacenamiento local no invalida el estado de la sesión en memoria.
   }
@@ -303,7 +303,6 @@ function readLocalState() {
       ...initial,
       config: { ...initial.config, ...stored.config },
       attendances: withoutDemoUsers(stored.attendances),
-      requests: withoutDemoUsers(stored.requests),
       auditLog: withoutDemoUsers(stored.auditLog),
     }
   } catch {
@@ -504,46 +503,17 @@ export async function clockOut(userId) {
   return result.ok ? { ...result, checkOut: result.record.checkOut } : result
 }
 
-export function createRequest({
-  userId,
-  type,
-  date,
-  reason,
-}) {
-  if (!reason?.trim()) {
-    return {
-      ok: false,
-      message: 'Describe el motivo. RH necesita el detalle para autorizar o rechazar.',
-    }
-  }
+export function loadMyRequests() {
+  return adminRequest('requests', 'solicitudes', '')
+}
 
-  if (!date) {
-    return {
-      ok: false,
-      message: 'Selecciona la fecha de la incidencia o permiso.',
-    }
-  }
-
-  patch((draft) => {
-    draft.requests.unshift({
-      id: uid('req'),
-      userId,
-      type,
-      date,
-      reason: reason.trim(),
-      status: 'pendiente',
-      createdAt: new Date().toISOString(),
-      reviewerId: null,
-      reviewNote: '',
-    })
-
-    return draft
+export function createRequest({ type, date, exitTime, attendanceId, reason }) {
+  const justification = type === 'justificacion'
+  const body = justification ? { attendanceId, reason } : { type, date, exitTime, reason }
+  return adminRequest('requests', 'solicitudes', justification ? '/justifications' : '', {
+    method: 'POST',
+    body: JSON.stringify(body),
   })
-
-  return {
-    ok: true,
-    message: 'Solicitud enviada a la bandeja de Recursos Humanos / Supervisor.',
-  }
 }
 
 export function reviewRequest({

@@ -1,10 +1,10 @@
 /**
  * Módulo del empleado (Barista, Cajero, Capacitador y también Supervisor).
  * - Registrar hora de entrada/salida con el reloj de MariaDB.
- * - Justificar retardo (extiende el marcaje de entrada).
+ * - Justificar un retardo vinculado a una asistencia.
  * - Solicitar permiso o falta.
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { AlertTriangle, LogIn, LogOut } from 'lucide-react'
 import { Badge, Button, Card, Field, inputClass, PageHeader, Toast } from '../components'
 import {
@@ -16,6 +16,7 @@ import {
   getShift,
   getState,
   getUser,
+  loadMyRequests,
   localISO,
 } from '../store'
 
@@ -149,67 +150,138 @@ export function EmployeeClock() {
   )
 }
 
+const requestLabels = { permiso: 'Permiso de salida', falta: 'Solicitud de falta', justificacion: 'Justificación de retardo' }
+
+function initialRequestForm() {
+  return { type: 'permiso', date: localISO(), exitTime: '', attendanceId: '', reason: '' }
+}
+
 export function EmployeeRequests() {
-  const user = getUser()
-  const data = getState()
-  const [type, setType] = useState('justificacion')
-  const [date, setDate] = useState(localISO())
-  const [reason, setReason] = useState('')
+  const [form, setForm] = useState(initialRequestForm)
+  const [inbox, setInbox] = useState(null)
+  const [loadAttempt, setLoadAttempt] = useState(0)
+  const [saving, setSaving] = useState(false)
+  const [formError, setFormError] = useState('')
   const [toast, setToast] = useState(null)
 
-  const mine = useMemo(
-    () => data.requests.filter((r) => r.userId === user.id),
-    [data.requests, user.id],
-  )
+  useEffect(() => {
+    let active = true
+    loadMyRequests().then(result => {
+      if (active) setInbox(result)
+    }).catch(() => {
+      if (active) setInbox({ ok: false, message: 'No se pudieron consultar tus solicitudes.' })
+    })
+    return () => { active = false }
+  }, [loadAttempt])
 
-  function submit(event) {
+  async function submit(event) {
     event.preventDefault()
-    const result = createRequest({ userId: user.id, type, date, reason })
-    setToast({ type: result.ok ? 'ok' : 'error', message: result.message })
-    if (result.ok) setReason('')
+    if (saving || !inbox?.canCreate) return
+    setSaving(true)
+    setFormError('')
+    try {
+      const result = await createRequest({
+        ...form,
+        exitTime: form.type === 'permiso' ? form.exitTime : undefined,
+        attendanceId: Number(form.attendanceId),
+      })
+      if (!result.ok) {
+        setFormError(result.message)
+        return
+      }
+
+      setInbox(current => ({
+        ...current,
+        requests: [result.request, ...current.requests],
+        lateAttendances: current.lateAttendances.filter(row => row.id !== result.request.attendanceId),
+      }))
+      setForm(current => ({ ...current, attendanceId: '', reason: '' }))
+      setToast({ type: 'ok', message: result.message })
+    } catch {
+      setFormError('No se pudo completar el envío. Consulta tus solicitudes antes de volver a intentar.')
+    } finally {
+      setSaving(false)
+    }
   }
+
+  const justifying = form.type === 'justificacion'
+  const lateAttendances = inbox?.lateAttendances ?? []
 
   return (
     <div>
       <PageHeader
         kicker="Incidencias"
-        title="Justificar retardo o solicitar permiso"
-        subtitle="Estas solicitudes sustituyen el mensaje de texto informal. RH o el supervisor autorizan o rechazan con folio."
+        title="Permisos, faltas y justificantes"
+        subtitle="Envía una solicitud y consulta su estado."
       />
       <div className="grid gap-5 lg:grid-cols-5">
         <Card className="lg:col-span-2">
-          <form className="space-y-4" onSubmit={submit}>
-            <Field label="Tipo">
-              <select className={inputClass} value={type} onChange={(e) => setType(e.target.value)}>
-                <option value="justificacion">Justificar retardo</option>
-                <option value="permiso">Solicitar permiso</option>
-                <option value="falta">Solicitar falta</option>
-              </select>
-            </Field>
-            <Field label="Fecha">
-              <input type="date" className={inputClass} value={date} onChange={(e) => setDate(e.target.value)} />
-            </Field>
-            <Field label="Motivo">
-              <textarea className={inputClass} rows={5} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Describe el motivo con claridad…" />
-            </Field>
-            <Button type="submit" className="w-full">Enviar a RH</Button>
-          </form>
+          {inbox?.canCreate ? (
+            <form className="space-y-4" onSubmit={submit}>
+              <Field label="Tipo">
+                <select className={inputClass} value={form.type} onChange={e => {
+                  setForm({ ...form, type: e.target.value, attendanceId: '' })
+                  setFormError('')
+                }} disabled={saving}>
+                  <option value="permiso">Solicitar permiso de salida</option>
+                  <option value="falta">Solicitar falta</option>
+                  <option value="justificacion">Justificar retardo</option>
+                </select>
+              </Field>
+              {justifying ? (
+                <Field label="Asistencia con retardo">
+                  <select className={inputClass} value={form.attendanceId} onChange={e => setForm({ ...form, attendanceId: e.target.value })} required disabled={saving || !lateAttendances.length}>
+                    <option value="">{lateAttendances.length ? 'Selecciona una asistencia' : 'No hay retardos disponibles para justificar'}</option>
+                    {lateAttendances.map(row => (
+                      <option key={row.id} value={row.id}>{row.date} · Entrada {row.entryAt.slice(11, 16)}</option>
+                    ))}
+                  </select>
+                </Field>
+              ) : (
+                <Field label="Fecha">
+                  <input type="date" className={inputClass} value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} required disabled={saving} />
+                </Field>
+              )}
+              {form.type === 'permiso' ? (
+                <Field label="Hora de salida (opcional)">
+                  <input type="time" className={inputClass} value={form.exitTime} onChange={e => setForm({ ...form, exitTime: e.target.value })} disabled={saving} />
+                </Field>
+              ) : null}
+              <Field label="Motivo">
+                <textarea className={inputClass} rows={5} maxLength={255} value={form.reason} onChange={e => setForm({ ...form, reason: e.target.value })} placeholder="Describe el motivo con claridad…" required disabled={saving} />
+              </Field>
+              {formError ? <p role="alert" className="text-sm text-berry">{formError}</p> : null}
+              <Button type="submit" className="w-full" disabled={saving || (justifying && !lateAttendances.length)}>
+                {saving ? 'Enviando…' : 'Enviar a RH'}
+              </Button>
+            </form>
+          ) : inbox?.ok ? <p className="text-sm text-cocoa-soft">Tu cuenta tiene acceso de consulta.</p> : null}
         </Card>
         <Card className="lg:col-span-3">
           <h2 className="font-display text-xl text-cocoa">Mis solicitudes</h2>
           <div className="mt-4 space-y-3">
-            {mine.length === 0 ? <p className="text-sm text-cocoa-soft">Aún no has enviado solicitudes.</p> : null}
-            {mine.map((row) => (
-              <article key={row.id} className="rounded-2xl bg-cream p-4">
+            {!inbox ? <p role="status" className="text-sm text-cocoa-soft">Cargando solicitudes…</p> : null}
+            {inbox?.ok === false ? (
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p role="alert" className="text-sm text-berry">{inbox.message}</p>
+                <Button variant="ghost" onClick={() => {
+                  setInbox(null)
+                  setLoadAttempt(attempt => attempt + 1)
+                }}>Reintentar</Button>
+              </div>
+            ) : null}
+            {inbox?.ok && !inbox.requests.length ? <p className="text-sm text-cocoa-soft">Aún no has enviado solicitudes.</p> : null}
+            {inbox?.ok ? inbox.requests.map(row => (
+              <article key={`${row.type}/${row.id}`} className="rounded-2xl bg-cream p-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="font-semibold capitalize text-cocoa">{row.type} · {row.date}</p>
+                  <p className="font-semibold text-cocoa">{requestLabels[row.type]} · {row.date}{row.exitTime ? ` · ${row.exitTime}` : ''}</p>
                   <Badge tone={row.status === 'aprobada' ? 'ok' : row.status === 'rechazada' ? 'bad' : 'warn'}>{row.status}</Badge>
                 </div>
                 <p className="mt-2 text-sm text-cocoa-soft">{row.reason}</p>
                 <p className="mt-2 text-xs text-cocoa-soft">Enviada: {formatDateTime(row.createdAt)}</p>
-                {row.reviewNote ? <p className="mt-2 text-sm">Nota de RH: {row.reviewNote}</p> : null}
+                {row.resolvedAt ? <p className="mt-1 text-xs text-cocoa-soft">Resuelta: {formatDateTime(row.resolvedAt)}</p> : null}
               </article>
-            ))}
+            )) : null}
           </div>
         </Card>
       </div>

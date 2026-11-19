@@ -9,6 +9,7 @@ import attendanceRoutes from './routes/attendanceRoutes.js'
 import shiftRoutes from './routes/shiftRoutes.js'
 import employeeRoutes from './routes/employeeRoutes.js'
 import holidayRoutes from './routes/holidayRoutes.js'
+import requestRoutes from './routes/requestRoutes.js'
 import { testDatabaseConnection } from './config/database.js'
 
 
@@ -58,6 +59,7 @@ app.use('/api/attendance', attendanceRoutes)
 app.use('/api/shifts', shiftRoutes)
 app.use('/api/employees', employeeRoutes)
 app.use('/api/holidays', holidayRoutes)
+app.use('/api/requests', requestRoutes)
 
 app.use((error, _req, res, _next) => {
   if (error.type === 'entity.parse.failed') {
