@@ -34,14 +34,33 @@ function decodeAttendance({ entry_audit, result_audit, ...row }) {
   return { ...row, entry: readAudit(entry_audit), result: readAudit(result_audit) }
 }
 
-function publicAttendance({ entry, result, ...row }, clock) {
+function decimalHours(value) {
+  if (typeof value !== 'number' && (typeof value !== 'string' || !/^\d+(\.\d+)?$/.test(value))) return null
+  const hours = Number(value)
+  return Number.isFinite(hours) && hours >= 0 ? hours : null
+}
+
+function calculationStatus(state, entry, result, hours) {
+  if (state === 'incompleto') return 'incompleto'
+  if (state === 'abierto') return entry?.status ?? 'sin_contexto'
+  if (result?.status && result.status !== 'calculado') return result.status
+  if (hours.includes(null)) return result ? 'horas_pendientes' : 'historico_sin_calculo'
+  if (result?.status === 'calculado') return 'calculado'
+  return hours.some(hoursInCategory => hoursInCategory > 0) ? 'historico' : 'historico_sin_calculo'
+}
+
+export function publicAttendance({ entry, result, ...row }, clock) {
   const estado = attendanceState({ ...row, entry, result }, clock)
-  const hasStoredHours = row.horas_normales !== 0 || row.horas_extra !== 0 || row.horas_festiva !== 0
-  const legacyStatus = hasStoredHours ? 'historico' : 'historico_sin_calculo'
+  const hours = {
+    horas_normales: decimalHours(row.horas_normales),
+    horas_extra: decimalHours(row.horas_extra),
+    horas_festiva: decimalHours(row.horas_festiva),
+  }
   return {
     ...row,
+    ...hours,
     estado,
-    estado_calculo: result?.status ?? (row.salida_local ? legacyStatus : entry?.status ?? 'sin_contexto'),
+    estado_calculo: calculationStatus(estado, entry, result, Object.values(hours)),
     minutos_retardo: entry?.lateMinutes ?? null,
     minutos_tolerancia: entry?.tolerance ?? null,
   }
@@ -218,12 +237,17 @@ export const clockOut = recordAttendance(200, async ({ connection, employeeId, c
 
   await logAttendance(connection, employeeId, row.id_asistencia, clock, 'CAMBIO', 'calculo_jornada', {
     status: result.status,
+    elapsedSeconds: elapsed ?? undefined,
     workedSeconds: result.workedSeconds,
   })
   return {
     id: row.id_asistencia,
-    message: result.status === 'calculado'
-      ? 'Salida registrada y horas guardadas.'
-      : 'Salida registrada. Las horas quedan pendientes de clasificación.',
+    message: closureMessage(result.status),
   }
 })
+
+function closureMessage(status) {
+  if (status === 'calculado') return 'Salida registrada y horas guardadas.'
+  if (status === 'descanso_pendiente') return 'Salida registrada. Las horas quedan pendientes de confirmar el descanso tomado.'
+  return 'Salida registrada. Las horas quedan pendientes de clasificación.'
+}

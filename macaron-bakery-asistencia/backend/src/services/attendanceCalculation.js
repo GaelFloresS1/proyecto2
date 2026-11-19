@@ -77,8 +77,10 @@ export function attendanceState(row, clock) {
   if (!row.entrada_local || !Number.isFinite(civilSeconds(row.entrada_local))) return 'incompleto'
   const context = row.entry
   if (row.salida_local) {
-    const elapsed = civilSeconds(row.salida_local) - civilSeconds(row.entrada_local)
-    return row.result || elapsed > 0 ? 'cerrado' : 'incompleto'
+    const civilElapsed = civilSeconds(row.salida_local) - civilSeconds(row.entrada_local)
+    const observedElapsed = row.result?.elapsedSeconds
+    const elapsed = Number.isInteger(observedElapsed) ? observedElapsed : civilElapsed
+    return Number.isFinite(civilElapsed) && elapsed > 0 ? 'cerrado' : 'incompleto'
   }
 
   const date = clock.local.slice(0, 10)
@@ -90,10 +92,18 @@ export function attendanceState(row, clock) {
 
 export function closeCalculation(entry, clock, hasHoliday) {
   if (!entry) return { status: 'sin_contexto' }
+  const elapsed = clock.epoch - entry.enteredAt
+  if (!Number.isInteger(elapsed) || elapsed <= 0 || elapsed >= secondsPerDay) return { status: 'incompleto' }
   if (entry.status !== 'pendiente') return { status: entry.status }
   if (hasHoliday) return { status: 'festivo_pendiente' }
+  // El turno registra un descanso previsto. Los marcajes de entrada y salida
+  // no indican cuánto descanso se tomó durante el período.
+  if (entry.rest !== 0) return { status: 'descanso_pendiente' }
+  if (!Number.isInteger(entry.scheduledSeconds) || entry.scheduledSeconds <= 0 || entry.scheduledSeconds >= secondsPerDay) {
+    return { status: 'turno_invalido' }
+  }
 
-  const workedSeconds = Math.max(0, clock.epoch - entry.enteredAt - entry.rest)
+  const workedSeconds = elapsed
   const hundredths = seconds => Math.round(seconds * 100 / 3600)
   const normalHundredths = hundredths(Math.min(workedSeconds, entry.scheduledSeconds))
   return {
