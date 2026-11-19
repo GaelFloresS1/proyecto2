@@ -1385,6 +1385,41 @@ export async function deactivateShift(shiftId) {
 }
 
 
+export async function activateShift(shiftId) {
+  const id = Number(shiftId)
+
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    return {
+      ok: false,
+      message: 'El ID del turno no es válido.',
+    }
+  }
+
+  const result = await shiftRequest(
+    `/${id}/activate`,
+    { method: 'PATCH' }
+  )
+
+  if (!result.ok) {
+    return result
+  }
+
+  const reloadResult = await loadShifts()
+
+  if (!reloadResult.ok) {
+    return {
+      ok: true,
+      message:
+        'El turno se reactivó, pero no se pudo actualizar la lista. Recarga la página.',
+    }
+  }
+
+  return {
+    ok: true,
+    message: result.message || 'Turno reactivado correctamente.',
+  }
+}
+
 
 export function saveConfig(partial, actorId) {
   patch((draft) => {

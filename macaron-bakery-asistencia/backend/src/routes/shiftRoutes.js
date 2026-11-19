@@ -6,6 +6,7 @@ import {
   createShift,
   updateShift,
   deactivateShift,
+  activateShift,
 } from '../controllers/shiftController.js'
 
 import { requireAuth } from '../middleware/requireAuth.js'
@@ -38,6 +39,12 @@ router.patch(
   '/:id/deactivate',
   requirePermission('TURNO_GESTIONAR'),
   deactivateShift
+)
+
+router.patch(
+  '/:id/activate',
+  requirePermission('TURNO_GESTIONAR'),
+  activateShift
 )
 
 export default router

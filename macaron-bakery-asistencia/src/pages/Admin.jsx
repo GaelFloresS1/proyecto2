@@ -18,6 +18,7 @@ import {
   saveConfig,
   saveEmployee,
   saveShift,
+  activateShift,
 } from '../store'
 
 
@@ -228,6 +229,32 @@ export function AdminShifts() {
   }
 
 
+  async function handleActivate(shift) {
+    if (deactivatingId !== null) return
+
+    setDeactivatingId(shift.id)
+
+    try {
+      const result = await activateShift(shift.id)
+
+      setToast({
+        type: result.ok ? 'ok' : 'error',
+        message: result.message,
+      })
+    } catch (error) {
+      console.error('Error al reactivar turno:', error)
+
+      setToast({
+        type: 'error',
+        message: 'Ocurrió un error al reactivar el turno.',
+      })
+    } finally {
+      setDeactivatingId(null)
+    }
+  }
+
+
+
   function toggleDay(id) {
     const has = form.weeklyDays.includes(id)
     setForm({
@@ -265,26 +292,39 @@ export function AdminShifts() {
                       {shift.active ? 'Activo' : 'Inactivo'}
                     </Badge>
 
-                    {shift.active && (
-                      <>
-                        <Button
-                          variant="ghost"
-                          onClick={() => setForm({ ...shift })}
-                        >
-                          Editar
-                        </Button>
+                    
+                  {shift.active ? (
+                    <>
+                      <Button
+                        variant="ghost"
+                        disabled={deactivatingId !== null}
+                        onClick={() => setForm({ ...shift })}
+                      >
+                        Editar
+                      </Button>
 
-                        <Button
-                          variant="danger"
-                          disabled={deactivatingId === shift.id}
-                          onClick={() => handleDeactivate(shift)}
-                        >
-                          {deactivatingId === shift.id
-                            ? 'Desactivando…'
-                            : 'Desactivar'}
-                        </Button>
-                      </>
-                    )}
+                      <Button
+                        variant="danger"
+                        disabled={deactivatingId !== null}
+                        onClick={() => handleDeactivate(shift)}
+                      >
+                        {deactivatingId === shift.id
+                          ? 'Desactivando…'
+                          : 'Desactivar'}
+                      </Button>
+                    </>
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      disabled={deactivatingId !== null}
+                      onClick={() => handleActivate(shift)}
+                    >
+                      {deactivatingId === shift.id
+                        ? 'Reactivando…'
+                        : 'Reactivar'}
+                    </Button>
+                  )}
+
                   </div>
 
               </article>

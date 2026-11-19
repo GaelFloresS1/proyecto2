@@ -235,7 +235,97 @@ export async function updateShift(req, res, next) {
 }
 
 // PATCH /api/shifts/:id/deactivate
+
+ // PATCH /api/shifts/:id/deactivate
 export async function deactivateShift(req, res, next) {
+  let connection
+
+  try {
+    const shiftId = Number(req.params.id)
+
+    if (!Number.isSafeInteger(shiftId) || shiftId <= 0) {
+      return res.status(400).json({
+        ok: false,
+        message: 'El ID del turno no es válido.',
+      })
+    }
+
+    connection = await pool.getConnection()
+    await connection.beginTransaction()
+
+    const [existing] = await connection.execute(
+      `SELECT id_turno, activo
+       FROM turno
+       WHERE id_turno = ?
+       FOR UPDATE`,
+      [shiftId]
+    )
+
+    if (existing.length === 0) {
+      await connection.rollback()
+
+      return res.status(404).json({
+        ok: false,
+        message: 'No se encontró el turno.',
+      })
+    }
+
+    if (!existing[0].activo) {
+      await connection.rollback()
+
+      return res.status(409).json({
+        ok: false,
+        message: 'El turno ya está desactivado.',
+      })
+    }
+
+    // Comprobar empleados activos que utilizan este turno.
+    const [employees] = await connection.execute(
+      `SELECT COUNT(*) AS total
+       FROM empleado
+       WHERE id_turno = ? AND activo = 1`,
+      [shiftId]
+    )
+
+    if (employees[0].total > 0) {
+      await connection.rollback()
+
+      return res.status(409).json({
+        ok: false,
+        message:
+          `No se puede desactivar el turno porque tiene ` +
+          `${employees[0].total} empleado(s) activo(s) asignado(s).`,
+      })
+    }
+
+    await connection.execute(
+      'UPDATE turno SET activo = 0 WHERE id_turno = ?',
+      [shiftId]
+    )
+
+    await connection.commit()
+
+    res.json({
+      ok: true,
+      message: 'Turno desactivado correctamente.',
+    })
+  } catch (error) {
+    if (connection) {
+      await connection.rollback()
+    }
+
+    next(error)
+  } finally {
+    if (connection) {
+      connection.release()
+    }
+  }
+}
+
+
+
+ // PATCH /api/shifts/:id/activate
+export async function activateShift(req, res, next) {
   try {
     const shiftId = Number(req.params.id)
 
@@ -258,21 +348,21 @@ export async function deactivateShift(req, res, next) {
       })
     }
 
-    if (!existing[0].activo) {
+    if (existing[0].activo) {
       return res.status(409).json({
         ok: false,
-        message: 'El turno ya está desactivado.',
+        message: 'El turno ya está activo.',
       })
     }
 
     await pool.execute(
-      'UPDATE turno SET activo = 0 WHERE id_turno = ?',
+      'UPDATE turno SET activo = 1 WHERE id_turno = ?',
       [shiftId]
     )
 
     res.json({
       ok: true,
-      message: 'Turno desactivado correctamente.',
+      message: 'Turno reactivado correctamente.',
     })
   } catch (error) {
     next(error)
