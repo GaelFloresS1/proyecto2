@@ -67,7 +67,7 @@ export default function App() {
             <Route path="/empleado/solicitudes" element={<EmployeeRequests />} />
             <Route
               path="/rh/solicitudes"
-              element={<Guard roles={[ROLES.ADMIN, ROLES.RH, ROLES.SUPERVISOR]}><HrInbox /></Guard>}
+              element={<Guard roles={[ROLES.ADMIN, ROLES.RH]}><HrInbox /></Guard>}
             />
             <Route path="/rh/festivos" element={<HrHolidays />} />
             <Route path="/rh/reportes" element={<Guard roles={[ROLES.ADMIN, ROLES.RH]}><HrReports /></Guard>} />

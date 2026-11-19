@@ -18,6 +18,12 @@ export const ROLE_LABEL = {
   empleado: 'Empleado',
 }
 
+export const REQUEST_LABEL = {
+  permiso: 'Permiso de salida',
+  falta: 'Solicitud de falta',
+  justificacion: 'Justificación de retardo',
+}
+
 export const POSITIONS = [
   'Barista',
   'Cajero',
@@ -283,7 +289,6 @@ function createInitialState() {
       monthlyHours: 192,
     },
     attendances: [],
-    requests: [],
     auditLog: [],
   }
 }
@@ -447,15 +452,13 @@ export async function logout() {
 export function homePathFor(role) {
   if (role === ROLES.ADMIN) return '/admin/empleados'
   if (role === ROLES.RH) return '/rh/solicitudes'
-  if (role === ROLES.SUPERVISOR) return '/rh/solicitudes'
 
   return '/empleado'
 }
 
 export function canAccess(role, area) {
   if (role === ROLES.ADMIN) return true
-  if (role === ROLES.RH) return ['rh', 'empleado'].includes(area)
-  if (role === ROLES.SUPERVISOR) return ['rh-inbox', 'empleado'].includes(area)
+  if (role === ROLES.RH) return ['rh', 'rh-inbox', 'empleado'].includes(area)
 
   return area === 'empleado'
 }
@@ -516,55 +519,17 @@ export function createRequest({ type, date, exitTime, attendanceId, reason }) {
   })
 }
 
-export function reviewRequest({
-  requestId,
-  status,
-  reviewerId,
-  reviewNote,
-}) {
-  const req = state.requests.find(
-    (r) => r.id === requestId,
-  )
+export function loadReviewRequests(status) {
+  const query = new URLSearchParams({ status })
+  return adminRequest('requests', 'solicitudes', `/review?${query}`)
+}
 
-  if (!req) {
-    return {
-      ok: false,
-      message: 'No se encontró la solicitud.',
-    }
-  }
-
-  patch((draft) => {
-    const target = draft.requests.find(
-      (r) => r.id === requestId,
-    )
-
-    const previous = target.status
-
-    target.status = status
-    target.reviewerId = reviewerId
-    target.reviewNote = reviewNote?.trim() || ''
-
-    addAudit(draft, {
-      userId: reviewerId,
-      action:
-        status === 'aprobada'
-          ? 'Autorizar permiso/falta'
-          : 'Rechazar permiso/falta',
-      entity: requestId,
-      previousValue: previous,
-      newValue: status,
+export function reviewRequest({ requestId, type, decision, note }) {
+  return adminRequest('requests', 'solicitudes',
+    `/review/${encodeURIComponent(type)}/${encodeURIComponent(requestId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ decision, note }),
     })
-
-    return draft
-  })
-
-  return {
-    ok: true,
-    message:
-      status === 'aprobada'
-        ? 'Solicitud autorizada.'
-        : 'Solicitud rechazada.',
-  }
 }
 
 export function loadHolidays() {

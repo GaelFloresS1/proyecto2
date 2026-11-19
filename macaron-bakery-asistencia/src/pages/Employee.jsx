@@ -4,7 +4,7 @@
  * - Justificar un retardo vinculado a una asistencia.
  * - Solicitar permiso o falta.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { AlertTriangle, LogIn, LogOut } from 'lucide-react'
 import { Badge, Button, Card, Field, inputClass, PageHeader, Toast } from '../components'
 import {
@@ -18,6 +18,7 @@ import {
   getUser,
   loadMyRequests,
   localISO,
+  REQUEST_LABEL,
 } from '../store'
 
 function attendanceBadge(record) {
@@ -150,8 +151,6 @@ export function EmployeeClock() {
   )
 }
 
-const requestLabels = { permiso: 'Permiso de salida', falta: 'Solicitud de falta', justificacion: 'Justificación de retardo' }
-
 function initialRequestForm() {
   return { type: 'permiso', date: localISO(), exitTime: '', attendanceId: '', reason: '' }
 }
@@ -163,15 +162,35 @@ export function EmployeeRequests() {
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState('')
   const [toast, setToast] = useState(null)
+  const revision = useRef(0)
 
   useEffect(() => {
     let active = true
-    loadMyRequests().then(result => {
-      if (active) setInbox(result)
-    }).catch(() => {
-      if (active) setInbox({ ok: false, message: 'No se pudieron consultar tus solicitudes.' })
-    })
-    return () => { active = false }
+    let loading = false
+    async function refresh(showError = false) {
+      if (loading || (!showError && document.hidden)) return
+      loading = true
+      const started = revision.current
+      try {
+        const result = await loadMyRequests()
+        if (active && started === revision.current && (result.ok || showError)) setInbox(result)
+      } catch {
+        if (active && showError && started === revision.current) {
+          setInbox({ ok: false, message: 'No se pudieron consultar tus solicitudes.' })
+        }
+      } finally {
+        loading = false
+      }
+    }
+    refresh(true)
+    const refreshVisible = () => refresh()
+    const timer = window.setInterval(refreshVisible, 30000)
+    window.addEventListener('focus', refreshVisible)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+      window.removeEventListener('focus', refreshVisible)
+    }
   }, [loadAttempt])
 
   async function submit(event) {
@@ -190,9 +209,11 @@ export function EmployeeRequests() {
         return
       }
 
+      revision.current += 1
       setInbox(current => ({
         ...current,
-        requests: [result.request, ...current.requests],
+        requests: [result.request, ...current.requests.filter(row =>
+          row.id !== result.request.id || row.type !== result.request.type)],
         lateAttendances: current.lateAttendances.filter(row => row.id !== result.request.attendanceId),
       }))
       setForm(current => ({ ...current, attendanceId: '', reason: '' }))
@@ -274,7 +295,7 @@ export function EmployeeRequests() {
             {inbox?.ok ? inbox.requests.map(row => (
               <article key={`${row.type}/${row.id}`} className="rounded-2xl bg-cream p-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="font-semibold text-cocoa">{requestLabels[row.type]} · {row.date}{row.exitTime ? ` · ${row.exitTime}` : ''}</p>
+                  <p className="font-semibold text-cocoa">{REQUEST_LABEL[row.type]} · {row.date}{row.exitTime ? ` · ${row.exitTime}` : ''}</p>
                   <Badge tone={row.status === 'aprobada' ? 'ok' : row.status === 'rechazada' ? 'bad' : 'warn'}>{row.status}</Badge>
                 </div>
                 <p className="mt-2 text-sm text-cocoa-soft">{row.reason}</p>

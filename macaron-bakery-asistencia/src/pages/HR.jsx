@@ -11,12 +11,13 @@ import {
   computeDay,
   formatDateTime,
   getState,
-  getUser,
   loadAdjustableAttendance,
   loadHolidays,
+  loadReviewRequests,
   localISO,
   money,
   removeHoliday,
+  REQUEST_LABEL,
   reviewRequest,
   upsertHoliday,
 } from '../store'
@@ -29,20 +30,52 @@ function monthRange() {
 }
 
 export function HrInbox() {
-  const actor = getUser()
-  const data = getState()
   const [filter, setFilter] = useState('pendiente')
+  const [inbox, setInbox] = useState(null)
+  const [loadAttempt, setLoadAttempt] = useState(0)
   const [note, setNote] = useState('')
   const [current, setCurrent] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const [reviewError, setReviewError] = useState('')
   const [toast, setToast] = useState(null)
 
-  const rows = data.requests.filter((r) => (filter === 'todas' ? true : r.status === filter))
+  useEffect(() => {
+    let active = true
+    loadReviewRequests(filter).then(result => {
+      if (active) setInbox({ ...result, filter })
+    }).catch(() => {
+      if (active) setInbox({ ok: false, filter, message: 'No se pudo cargar la bandeja.' })
+    })
+    return () => { active = false }
+  }, [filter, loadAttempt])
 
-  function decide(status) {
-    const result = reviewRequest({ requestId: current.id, status, reviewerId: actor.id, reviewNote: note })
-    setToast({ type: result.ok ? 'ok' : 'error', message: result.message })
-    setCurrent(null)
+  const loaded = inbox?.filter === filter ? inbox : null
+
+  function openReview(row) {
     setNote('')
+    setReviewError('')
+    setCurrent(row)
+  }
+
+  async function decide(decision) {
+    if (saving) return
+    setSaving(true)
+    setReviewError('')
+    try {
+      const result = await reviewRequest({ requestId: current.id, type: current.type, decision, note })
+      if (!result.ok) {
+        setReviewError(result.message)
+        if (result.status === 409) setLoadAttempt(attempt => attempt + 1)
+        return
+      }
+      setLoadAttempt(attempt => attempt + 1)
+      setCurrent(null)
+      setToast({ type: 'ok', message: result.message })
+    } catch {
+      setReviewError('No se pudo completar la resolución. Consulta la bandeja antes de volver a intentar.')
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
@@ -50,9 +83,9 @@ export function HrInbox() {
       <PageHeader
         kicker="Recursos Humanos"
         title="Bandeja de permisos y faltas"
-        subtitle="Autoriza o rechaza incidencias. Cada decisión queda en bitácora con usuario, fecha y valor anterior."
+        subtitle="Autoriza o rechaza permisos, faltas y justificantes. Cada decisión queda en bitácora."
         actions={
-          <select className={`${inputClass} w-auto`} value={filter} onChange={(e) => setFilter(e.target.value)}>
+          <select aria-label="Estado de solicitudes" className={`${inputClass} w-auto`} value={filter} onChange={e => setFilter(e.target.value)}>
             <option value="pendiente">Pendientes</option>
             <option value="aprobada">Aprobadas</option>
             <option value="rechazada">Rechazadas</option>
@@ -61,37 +94,48 @@ export function HrInbox() {
         }
       />
       <div className="space-y-3">
-        {rows.length === 0 ? <Card><p className="text-sm text-cocoa-soft">No hay solicitudes en este filtro.</p></Card> : null}
-        {rows.map((row) => {
-          const emp = data.users.find((u) => u.id === row.userId)
-          return (
-            <Card key={row.id} className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-              <div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <p className="font-semibold text-cocoa">{emp?.name}</p>
-                  <Badge tone="neutral">{emp?.position}</Badge>
-                  <Badge tone={row.status === 'aprobada' ? 'ok' : row.status === 'rechazada' ? 'bad' : 'warn'}>{row.status}</Badge>
-                </div>
-                <p className="mt-1 text-sm capitalize text-cocoa-soft">{row.type} · {row.date} · {formatDateTime(row.createdAt)}</p>
-                <p className="mt-2 max-w-3xl text-sm">{row.reason}</p>
-                {row.reviewNote ? <p className="mt-2 text-sm text-cocoa-soft">Nota: {row.reviewNote}</p> : null}
+        {!loaded ? <Card><p role="status" className="text-sm text-cocoa-soft">Cargando solicitudes…</p></Card> : null}
+        {loaded?.ok === false ? (
+          <Card className="flex flex-wrap items-center justify-between gap-2">
+            <p role="alert" className="text-sm text-berry">{loaded.message}</p>
+            {loaded.status !== 403 ? <Button variant="ghost" onClick={() => setLoadAttempt(attempt => attempt + 1)}>Reintentar</Button> : null}
+          </Card>
+        ) : null}
+        {loaded?.ok && !loaded.requests.length ? <Card><p className="text-sm text-cocoa-soft">No hay solicitudes en este filtro.</p></Card> : null}
+        {loaded?.ok ? loaded.requests.map(row => (
+          <Card key={`${row.type}/${row.id}`} className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="font-semibold text-cocoa">{row.employeeName}</p>
+                <Badge tone="neutral">{row.employeePosition}</Badge>
+                <Badge tone={row.status === 'aprobada' ? 'ok' : row.status === 'rechazada' ? 'bad' : 'warn'}>{row.status}</Badge>
               </div>
-              {row.status === 'pendiente' ? (
-                <Button onClick={() => setCurrent(row)}>Revisar</Button>
-              ) : null}
-            </Card>
-          )
-        })}
+              <p className="mt-1 text-sm text-cocoa-soft">
+                {REQUEST_LABEL[row.type]} · {row.date}{row.exitTime ? ` · ${row.exitTime}` : ''}
+              </p>
+              <p className="mt-2 max-w-3xl text-sm">{row.reason}</p>
+              <p className="mt-2 text-xs text-cocoa-soft">Enviada el {formatDateTime(row.createdAt)}</p>
+              {row.resolvedAt ? <p className="mt-1 text-xs text-cocoa-soft">Resuelta el {formatDateTime(row.resolvedAt)}</p> : null}
+              {row.reviewNote ? <p className="mt-2 text-sm text-cocoa-soft">Observación · {row.reviewNote}</p> : null}
+            </div>
+            {row.canResolve ? <Button onClick={() => openReview(row)}>Revisar</Button> : null}
+            {row.status === 'pendiente' && !row.canResolve
+              ? <p className="text-sm text-cocoa-soft">Otra persona con permiso debe resolverla.</p>
+              : null}
+          </Card>
+        )) : null}
       </div>
       {current ? (
-        <Modal title="Autorizar o rechazar" onClose={() => setCurrent(null)}>
-          <p className="text-sm text-cocoa-soft">{current.reason}</p>
-          <Field label="Nota para el expediente">
-            <textarea className={inputClass} rows={3} value={note} onChange={(e) => setNote(e.target.value)} />
+        <Modal title="Autorizar o rechazar" onClose={() => { if (!saving) setCurrent(null) }}>
+          <p className="text-sm text-cocoa-soft">{current.employeeName} · {REQUEST_LABEL[current.type]} · {current.date}</p>
+          <p className="mt-2 text-sm text-cocoa-soft">{current.reason}</p>
+          <Field label="Observación (obligatoria al rechazar)">
+            <textarea className={inputClass} rows={3} maxLength={255} value={note} onChange={e => setNote(e.target.value)} disabled={saving} />
           </Field>
+          {reviewError ? <p role="alert" className="mt-2 text-sm text-berry">{reviewError}</p> : null}
           <div className="mt-4 flex gap-2">
-            <Button variant="danger" className="flex-1" onClick={() => decide('rechazada')}>Rechazar</Button>
-            <Button className="flex-1" onClick={() => decide('aprobada')}>Autorizar</Button>
+            <Button variant="danger" className="flex-1" disabled={saving} onClick={() => decide('rechazar')}>Rechazar</Button>
+            <Button className="flex-1" disabled={saving} onClick={() => decide('aprobar')}>{saving ? 'Guardando…' : 'Autorizar'}</Button>
           </div>
         </Modal>
       ) : null}

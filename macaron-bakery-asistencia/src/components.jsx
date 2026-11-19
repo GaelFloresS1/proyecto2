@@ -138,7 +138,7 @@ function navFor(role) {
   ]
   if (role === ROLES.ADMIN) return [...admin, ...rh, ...employee]
   if (role === ROLES.RH) return [...rh, ...employee]
-  if (role === ROLES.SUPERVISOR) return [rh[0], holidays, ...employee]
+  if (role === ROLES.SUPERVISOR) return [holidays, ...employee]
   return [...employee, holidays]
 }
 
