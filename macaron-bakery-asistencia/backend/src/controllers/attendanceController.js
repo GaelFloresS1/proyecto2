@@ -248,6 +248,6 @@ export const clockOut = recordAttendance(200, async ({ connection, employeeId, c
 
 function closureMessage(status) {
   if (status === 'calculado') return 'Salida registrada y horas guardadas.'
-  if (status === 'descanso_pendiente') return 'Salida registrada. Las horas quedan pendientes de confirmar el descanso tomado.'
+  if (status === 'descanso_pendiente') return 'Salida registrada. Las horas quedan pendientes porque el descanso programado de la jornada es inválido o no está disponible.'
   return 'Salida registrada. Las horas quedan pendientes de clasificación.'
 }

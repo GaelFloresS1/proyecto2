@@ -96,14 +96,13 @@ export function closeCalculation(entry, clock, hasHoliday) {
   if (!Number.isInteger(elapsed) || elapsed <= 0 || elapsed >= secondsPerDay) return { status: 'incompleto' }
   if (entry.status !== 'pendiente') return { status: entry.status }
   if (hasHoliday) return { status: 'festivo_pendiente' }
-  // El turno registra un descanso previsto. Los marcajes de entrada y salida
-  // no indican cuánto descanso se tomó durante el período.
-  if (entry.rest !== 0) return { status: 'descanso_pendiente' }
+  if (!Number.isInteger(entry.rest) || entry.rest < 0) return { status: 'descanso_pendiente' }
   if (!Number.isInteger(entry.scheduledSeconds) || entry.scheduledSeconds <= 0 || entry.scheduledSeconds >= secondsPerDay) {
     return { status: 'turno_invalido' }
   }
 
-  const workedSeconds = elapsed
+  const deductedRest = Math.min(entry.rest, elapsed)
+  const workedSeconds = elapsed - deductedRest
   const hundredths = seconds => Math.round(seconds * 100 / 3600)
   const normalHundredths = hundredths(Math.min(workedSeconds, entry.scheduledSeconds))
   return {

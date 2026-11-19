@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { publicAttendance } from '../src/controllers/attendanceController.js'
+import pool from '../src/config/database.js'
+import { clockIn, clockOut, publicAttendance } from '../src/controllers/attendanceController.js'
 import { attendanceState, closeCalculation, entryContext, withLateness } from '../src/services/attendanceCalculation.js'
 
 const dayShift = {
@@ -31,13 +32,36 @@ test('un turno sin descanso programado distribuye las horas sin superposición',
   }
 })
 
-test('una jornada con descanso previsto queda pendiente si solo hay marcajes de entrada y salida', () => {
-  const entry = entryContext(clock('2026-11-16 08:00:00'), { ...dayShift, minutos_descanso: 30 })
-  for (const time of ['08:15:00', '08:30:00', '08:45:00', '17:00:00']) {
-    const result = closeCalculation(entry, clock(`2026-11-16 ${time}`), false)
-    assert.deepEqual(result, { status: 'descanso_pendiente' })
+test('el cierre usa el descanso de 30 minutos guardado al entrar y calcula el excedente', () => {
+  const shift = { ...dayShift, minutos_descanso: 30 }
+  const entry = entryContext(clock('2026-11-16 08:00:00'), shift)
+  assert.equal(entry.rest, 1800)
+  assert.equal(entry.scheduledSeconds, 30600)
+  shift.minutos_descanso = 60
+
+  assert.deepEqual(closeCalculation(entry, clock('2026-11-16 17:00:00'), false), {
+    status: 'calculado', workedSeconds: 30600, normal: 8.5, extra: 0, holiday: 0,
+  })
+  assert.deepEqual(closeCalculation(entry, clock('2026-11-16 18:30:00'), false), {
+    status: 'calculado', workedSeconds: 36000, normal: 8.5, extra: 1.5, holiday: 0,
+  })
+})
+
+test('el descanso de 30 minutos se limita a los 15 minutos transcurridos', () => {
+  const start = clock('2026-11-16 08:00:00')
+  const entry = entryContext(start, { ...dayShift, minutos_descanso: 30 })
+  assert.deepEqual(closeCalculation(entry, clock('2026-11-16 08:15:00'), false), {
+    status: 'calculado', workedSeconds: 0, normal: 0, extra: 0, holiday: 0,
+  })
+  assert.equal(closeCalculation(entry, start, false).status, 'incompleto')
+})
+
+test('un contexto sin un descanso programado válido queda pendiente', () => {
+  const entry = entryContext(clock('2026-11-16 08:00:00'), dayShift)
+  const exit = clock('2026-11-16 17:00:00')
+  for (const rest of [undefined, null, -1]) {
+    assert.deepEqual(closeCalculation({ ...entry, rest }, exit, false), { status: 'descanso_pendiente' })
   }
-  assert.equal(closeCalculation(entry, clock('2026-11-16 08:00:00'), false).status, 'incompleto')
 })
 
 test('el retardo usa la tolerancia del marcaje y detecta segundos fuera del límite', () => {
@@ -49,14 +73,14 @@ test('el retardo usa la tolerancia del marcaje y detecta segundos fuera del lím
 })
 
 test('un turno nocturno conserva su fecha de referencia y admite salida al día siguiente', () => {
-  const nightShift = { ...dayShift, hora_inicio: '22:00:00', hora_fin: '06:00:00' }
+  const nightShift = { ...dayShift, hora_inicio: '22:00:00', hora_fin: '06:00:00', minutos_descanso: 30 }
   const entryClock = clock('2026-11-16 22:00:00')
   const entry = entryContext(entryClock, nightShift)
   const row = { entrada_local: entryClock.local, fecha_local: entry.date, entry, salida_local: null }
-  const exit = clock('2026-11-17 06:30:00')
+  const exit = clock('2026-11-17 06:00:00')
   assert.equal(attendanceState(row, exit), 'abierto')
   const result = closeCalculation(entry, exit, false)
-  assert.deepEqual([result.normal, result.extra, result.holiday], [8, 0.5, 0])
+  assert.deepEqual([result.status, result.normal, result.extra, result.holiday], ['calculado', 7.5, 0, 0])
   assert.equal(attendanceState(row, clock('2026-11-17 22:00:00')), 'incompleto')
 })
 
@@ -128,3 +152,34 @@ test('un cierre conserva el motivo pendiente y una duración inválida prevalece
   }, now)
   assert.deepEqual([observed.estado, observed.estado_calculo], ['cerrado', 'descanso_pendiente'])
 })
+
+for (const [name, mark, row] of [
+  ['una entrada duplicada con la jornada abierta', clockIn, { ...closedRow, salida_local: null }],
+  ['una entrada duplicada con la jornada cerrada', clockIn, closedRow],
+  ['una salida duplicada', clockOut, closedRow],
+]) {
+  test(`rechaza ${name} sin escribir en MariaDB`, async t => {
+    const now = clock('2026-11-16 18:00:00')
+    const connection = {
+      beginTransaction: t.mock.fn(),
+      rollback: t.mock.fn(),
+      release: t.mock.fn(),
+      query: async () => [[now]],
+      async execute(sql) {
+        if (sql.includes('FROM empleado')) return [[{ id_turno: null, activo: 1, bloqueado: 0 }]]
+        assert.match(sql, /^\s*SELECT[\s\S]+FROM asistencia a/)
+        return [[row]]
+      },
+    }
+    t.mock.method(pool, 'getConnection', async () => connection)
+    const response = {
+      status: t.mock.fn(function () { return this }),
+      json: t.mock.fn(),
+    }
+    await mark({ session: { employee: { id: 1 } } }, response, assert.ifError)
+    assert.deepEqual(response.status.mock.calls[0].arguments, [409])
+    assert.equal(response.json.mock.calls[0].arguments[0].ok, false)
+    assert.equal(connection.rollback.mock.callCount(), 1)
+    assert.equal(connection.release.mock.callCount(), 1)
+  })
+}
