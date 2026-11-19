@@ -20,6 +20,7 @@ import {
   removeHoliday,
   REQUEST_LABEL,
   reviewRequest,
+  roundEstimatedPay,
   saveAttendanceReport,
   upsertHoliday,
 } from '../store'
@@ -347,7 +348,7 @@ export function HrReports() {
       'Faltas/permisos autorizados': block.authorizedAbsences ?? requestStatus,
       'Solicitudes pendientes': block.pending ?? requestStatus,
       'Solicitudes rechazadas': block.rejected ?? requestStatus,
-      'Pago estimado del período': block.pay ? Number(block.pay.total.toFixed(2)) : null,
+      'Pago estimado del período': block.pay ? roundEstimatedPay(block.pay.total) : null,
     }))
     const sheet = XLSX.utils.json_to_sheet(rows)
     const book = XLSX.utils.book_new()

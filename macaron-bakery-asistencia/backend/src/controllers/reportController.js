@@ -1,11 +1,14 @@
 import pool from '../config/database.js'
 import { normalizeRole } from '../middleware/requireAuth.js'
+import { hasPermission } from '../middleware/requirePermission.js'
 import { validDate } from '../services/calendarDate.js'
+import { DEFAULT_REPORT_RATES, estimateReportPay, roundEstimatedPay } from '../services/reportEstimate.js'
 import { databaseClock, readAttendancePeriod } from './attendanceController.js'
 
 const reportType = 'ASISTENCIA_PUNTUALIDAD'
 const pageSize = 15
 const maxId = 2147483647
+const maxEstimatedPay = 99_999_999.99
 const reportSelect = `
   SELECT r.id_reporte AS id, CAST(r.periodo_inicio AS CHAR) AS periodStart,
          CAST(r.periodo_fin AS CHAR) AS periodEnd,
@@ -24,9 +27,16 @@ function readId(value) {
     : null
 }
 
+function validRates(rates) {
+  return rates !== null && typeof rates === 'object' && !Array.isArray(rates) &&
+    Object.keys(rates).length === 3 &&
+    Number.isFinite(rates.monthlyHours) && rates.monthlyHours > 0 &&
+    Number.isFinite(rates.extraHourMultiplier) && Number.isFinite(rates.holidayHourMultiplier)
+}
+
 async function summarizePeriod(db, clock, { from, to, employeeId }) {
   const [employees] = await db.execute(
-    `SELECT e.id_empleado AS id, r.nombre AS role
+    `SELECT e.id_empleado AS id, e.sueldo_base AS salary, r.nombre AS role
        FROM empleado e JOIN rol r ON r.id_rol = e.id_rol
        ${employeeId === undefined ? '' : 'WHERE e.id_empleado = ?'}
        ORDER BY e.id_empleado`,
@@ -35,6 +45,7 @@ async function summarizePeriod(db, clock, { from, to, employeeId }) {
   const details = new Map(employees.filter(employee => normalizeRole(employee.role) !== 'administrador')
     .map(employee => [employee.id, {
       employeeId: employee.id,
+      salary: employee.salary,
       attendances: 0, late: 0, authorizedAbsences: 0, unauthorizedAbsences: 0, authorizedExits: 0,
       normal: 0, extra: 0, holiday: 0, pendingHours: 0, pendingAbsences: 0,
     }]))
@@ -100,12 +111,15 @@ async function summarizePeriod(db, clock, { from, to, employeeId }) {
 export async function createAttendanceReport(req, res, next) {
   const body = req.body
   if (!body || typeof body !== 'object' || Array.isArray(body) ||
-      Object.keys(body).some(key => !['from', 'to', 'employeeId'].includes(key))) {
-    return res.status(400).json({ ok: false, message: 'Envía únicamente el período y, si aplica, el empleado.' })
+      Object.keys(body).some(key => !['from', 'to', 'employeeId', 'rates'].includes(key))) {
+    return res.status(400).json({ ok: false, message: 'Envía únicamente el período, los parámetros de estimación y, si aplica, el empleado.' })
   }
-  const { from, to, employeeId } = body
+  const { from, to, employeeId, rates = DEFAULT_REPORT_RATES } = body
   if (!validDate(from) || !validDate(to) || from > to || (employeeId !== undefined && !validId(employeeId))) {
     return res.status(400).json({ ok: false, message: 'Selecciona un período y un empleado válidos.' })
+  }
+  if (!validRates(rates)) {
+    return res.status(400).json({ ok: false, message: 'Los parámetros del importe estimado no son válidos.' })
   }
 
   let db
@@ -127,21 +141,27 @@ export async function createAttendanceReport(req, res, next) {
       [reportType, from, to, clock.local, actorId],
     )
     for (const detail of details.values()) {
+      const hours = { normal: detail.normal / 100, extra: detail.extra / 100, holidayHours: detail.holiday / 100 }
+      const estimatedPay = roundEstimatedPay(estimateReportPay(hours, detail.salary, rates).total)
+      if (!Number.isFinite(estimatedPay) || Math.abs(estimatedPay) > maxEstimatedPay) {
+        await db.rollback()
+        return res.status(422).json({ ok: false, message: 'El importe estimado excede el rango que se puede guardar. Revisa el período y las tarifas.' })
+      }
       const [saved] = await db.execute(
         `INSERT INTO detalle_reporte (
            id_reporte, id_empleado, asistencias, retardos, faltas_autorizadas, faltas_no_autorizadas,
            salidas_autorizadas, horas_normal, horas_extra, horas_festiva, importe_estimado
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.00)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [report.insertId, detail.employeeId, detail.attendances, detail.late,
           detail.authorizedAbsences, detail.unauthorizedAbsences, detail.authorizedExits,
-          detail.normal / 100, detail.extra / 100, detail.holiday / 100],
+          hours.normal, hours.extra, hours.holidayHours, estimatedPay],
       )
-      // El detalle no tiene columnas para conservar cuántos registros quedaron sin clasificar.
+      // La bitácora conserva los pendientes y las tarifas usadas para el importe.
       await db.execute(
         `INSERT INTO bitacora (fecha_hora, accion, entidad, id_registro_afectado, campo, valor_nuevo, id_usuario)
          VALUES (?, 'ALTA', 'detalle_reporte', ?, 'clasificacion', ?, ?)`,
         [clock.local, saved.insertId, JSON.stringify({
-          pendingHours: detail.pendingHours, pendingAbsences: detail.pendingAbsences,
+          pendingHours: detail.pendingHours, pendingAbsences: detail.pendingAbsences, estimateRates: rates,
         }), actorId],
       )
     }
@@ -176,11 +196,13 @@ export async function getAttendanceReport(req, res, next) {
     if (!id) return res.status(400).json({ ok: false, message: 'El ID del reporte no es válido.' })
     const [[report]] = await pool.execute(`${reportSelect} AND r.id_reporte = ?`, [reportType, id])
     if (!report) return res.status(404).json({ ok: false, message: 'No se encontró el reporte de asistencia.' })
+    const canViewEstimatedPay = await hasPermission(req.session.employee.id, 'NOMINA_CONSULTAR')
     const [rows] = await pool.execute(
       `SELECT d.id_empleado AS employeeId, e.nombre_completo AS employeeName,
               d.asistencias AS attendances, d.retardos AS late, d.faltas_autorizadas AS authorizedAbsences,
               d.faltas_no_autorizadas AS unauthorizedAbsences, d.salidas_autorizadas AS authorizedExits,
               d.horas_normal AS normal, d.horas_extra AS extra, d.horas_festiva AS holiday,
+              d.importe_estimado AS estimatedPay,
               (SELECT CASE WHEN JSON_VALID(b.valor_nuevo) THEN b.valor_nuevo END FROM bitacora b
                 WHERE b.id_usuario = ? AND b.entidad = 'detalle_reporte' AND b.accion = 'ALTA'
                   AND b.id_registro_afectado = d.id_detalle AND b.campo = 'clasificacion'
@@ -190,12 +212,18 @@ export async function getAttendanceReport(req, res, next) {
         ORDER BY d.id_empleado`,
       [report.generatedById, id],
     )
-    const details = rows.map(({ classification, ...detail }) => {
-      const { pendingHours, pendingAbsences } = JSON.parse(classification) ?? {}
-      return { ...detail, pendingHours: pendingHours ?? null, pendingAbsences: pendingAbsences ?? null }
+    const details = rows.map(({ classification, estimatedPay, ...detail }) => {
+      const { pendingHours, pendingAbsences, estimateRates } = JSON.parse(classification) ?? {}
+      const hasEstimate = Boolean(estimateRates) || estimatedPay !== 0
+      return {
+        ...detail,
+        pendingHours: pendingHours ?? null,
+        pendingAbsences: pendingAbsences ?? null,
+        estimatedPay: canViewEstimatedPay && hasEstimate ? estimatedPay : null,
+      }
     })
     res.set('Cache-Control', 'no-store')
-    res.json({ ok: true, report: { ...report, details } })
+    res.json({ ok: true, report: { ...report, canViewEstimatedPay, details } })
   } catch (error) {
     next(error)
   }

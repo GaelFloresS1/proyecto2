@@ -3,8 +3,11 @@ import { once } from 'node:events'
 import test from 'node:test'
 import express from 'express'
 import pool from '../src/config/database.js'
+import attendanceRoutes from '../src/routes/attendanceRoutes.js'
 import reportRoutes from '../src/routes/reportRoutes.js'
-import { loadAttendanceReport, loadAttendanceReports, saveAttendanceReport } from '../../src/store.js'
+import {
+  buildReport, loadAdjustableAttendance, loadAttendanceReport, loadAttendanceReports, money, patch, saveAttendanceReport,
+} from '../../src/store.js'
 
 test('reportes históricos de asistencia con MariaDB', {
   skip: process.env.ATTENDANCE_TEST_MARIADB !== '1',
@@ -14,14 +17,16 @@ test('reportes históricos de asistencia con MariaDB', {
     db.release()
     await pool.end()
   })
+  const [rolePermissions] = await db.query('SELECT id_rol, id_permiso FROM rol_permiso')
   // Las escrituras se limitan a tablas temporales de esta conexión.
-  for (const table of ['empleado', 'asistencia', 'solicitud_permiso', 'justificante', 'falta', 'bitacora', 'reporte', 'detalle_reporte']) {
+  for (const table of ['empleado', 'asistencia', 'solicitud_permiso', 'justificante', 'falta', 'bitacora', 'reporte', 'detalle_reporte', 'rol_permiso']) {
     const [[definition]] = await db.query('SHOW CREATE TABLE ??', [table])
     await db.query(definition['Create Table']
       .replace('CREATE TABLE', 'CREATE TEMPORARY TABLE')
       .replace(/^  CONSTRAINT [^\n]+ FOREIGN KEY [^\n]+\n/gm, '')
       .replace(/,\n\)/g, '\n)'))
   }
+  await db.query('INSERT INTO rol_permiso (id_rol, id_permiso) VALUES ?', [rolePermissions.map(row => [row.id_rol, row.id_permiso])])
 
   async function addEmployee(username, role) {
     const [result] = await db.execute(
@@ -109,12 +114,14 @@ test('reportes históricos de asistencia con MariaDB', {
     req.session = actor ? { employee: { id: actor } } : {}
     next()
   })
+  app.use('/api/attendance', attendanceRoutes)
   app.use('/api/reports', reportRoutes)
   app.use((error, _req, res, _next) => res.status(500).json({ message: error.message }))
   const server = app.listen(0, '127.0.0.1')
   await once(server, 'listening')
   t.after(() => new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())))
-  const api = `http://127.0.0.1:${server.address().port}/api/reports`
+  const base = `http://127.0.0.1:${server.address().port}`
+  const api = base + '/api/reports'
 
   async function request(path = '', { actor = hr, body } = {}) {
     const response = await fetch(api + path, {
@@ -136,6 +143,9 @@ test('reportes históricos de asistencia con MariaDB', {
       }
     }
     assert.equal((await request('', { body: { ...period, normal: 900 } })).status, 400)
+    assert.equal((await request('', { body: { ...period, salary: 9999 } })).status, 400)
+    assert.equal((await request('', { body: { ...period, rates: { monthlyHours: 0, extraHourMultiplier: 1, holidayHourMultiplier: 2 } } })).status, 400)
+    assert.equal((await request('', { body: { ...period, rates: { monthlyHours: 192, extraHourMultiplier: '1.5', holidayHourMultiplier: 2 } } })).status, 400)
     assert.equal((await request('', { body: { ...period, from: '2024-02-30' } })).status, 400)
     assert.equal((await request('', { body: { ...period, employeeId: '1' } })).status, 400)
     assert.equal((await request('', { body: { ...period, employeeId: admin } })).status, 404)
@@ -156,7 +166,7 @@ test('reportes históricos de asistencia con MariaDB', {
     const [details] = await db.execute(
       'SELECT id_empleado, importe_estimado FROM detalle_reporte WHERE id_reporte = ?', [singleId],
     )
-    assert.deepEqual(details, [{ id_empleado: worker, importe_estimado: 0 }])
+    assert.deepEqual(details, [{ id_empleado: worker, importe_estimado: 122.4 }])
 
     const result = await request(`/${singleId}`)
     assert.equal(result.status, 200, result.data.message)
@@ -167,7 +177,7 @@ test('reportes históricos de asistencia con MariaDB', {
     assert.deepEqual(savedSnapshot.details, [{
       employeeId: worker, employeeName: 'empleado_reporte', attendances: 6, late: 1,
       authorizedAbsences: 1, unauthorizedAbsences: 1, authorizedExits: 1,
-      normal: 8.25, extra: 1.5, holiday: 6.5, pendingHours: 3, pendingAbsences: 3,
+      normal: 8.25, extra: 1.5, holiday: 6.5, pendingHours: 3, pendingAbsences: 3, estimatedPay: 122.4,
     }])
   })
 
@@ -182,9 +192,11 @@ test('reportes históricos de asistencia con MariaDB', {
     assert.deepEqual(details.map(detail => detail.employeeId), [hr, worker, supervisor])
     assert.equal(details[0].attendances, 0)
     assert.equal(details[0].normal, 0)
+    assert.equal(details[0].estimatedPay, 0)
     assert.equal(details[1].normal, 7)
     assert.equal(details[1].late, 0)
     assert.equal(details[1].pendingAbsences, 2)
+    assert.equal(details[1].estimatedPay, 115.89)
     assert.equal(details[2].normal, 4)
     assert.deepEqual((await request(`/${singleId}`)).data.report, savedSnapshot)
     assert.deepEqual((await request()).data.reports.map(report => report.id), [id, singleId])
@@ -203,6 +215,11 @@ test('reportes históricos de asistencia con MariaDB', {
       return rows[0]
     }
     const before = await counts()
+    const overflow = await request('', {
+      body: { ...period, rates: { monthlyHours: 192, extraHourMultiplier: 1e100, holidayHourMultiplier: 2 } },
+    })
+    assert.equal(overflow.status, 422)
+    assert.deepEqual(await counts(), before)
     writesUntilFailure = 2
     const result = await request('', { body: period })
     assert.equal(result.status, 500)
@@ -210,16 +227,72 @@ test('reportes históricos de asistencia con MariaDB', {
     assert.deepEqual(await counts(), before)
   })
 
-  await t.test('los métodos de la pantalla guardan el filtro y consultan el histórico', async subtest => {
+  await t.test('la vista y el histórico coinciden con las mismas horas y tarifas personalizadas', async subtest => {
     const originalFetch = globalThis.fetch
-    subtest.mock.method(globalThis, 'fetch', (path, options) => originalFetch(api + path.slice('/api/reports'.length), {
+    subtest.mock.method(globalThis, 'fetch', (path, options) => originalFetch(base + path, {
       ...options, headers: { ...options.headers, 'x-test-actor': String(hr) },
     }))
-    const created = await saveAttendanceReport({ ...period, userId: String(supervisor) })
+    const salary = 3650.31
+    await db.execute('UPDATE empleado SET sueldo_base = ? WHERE id_empleado = ?', [salary, worker])
+    const config = { monthlyHours: 100, extraHourMultiplier: 2.5, holidayHourMultiplier: 3 }
+    patch(() => ({ users: [{ id: worker, salary }], config }))
+    const filters = { ...period, userId: String(worker) }
+    const live = await loadAdjustableAttendance(filters)
+    assert.equal(live.ok, true, live.message)
+    const [preview] = buildReport({ ...filters, attendances: live.records })
+    const created = await saveAttendanceReport(filters)
     assert.equal(created.ok, true, created.message)
     const history = await loadAttendanceReports(1)
     assert.equal(history.reports[0].id, created.reportId)
     const result = await loadAttendanceReport(created.reportId)
-    assert.deepEqual(result.report.details.map(detail => detail.employeeId), [supervisor])
+    const [detail] = result.report.details
+    assert.equal(detail.employeeId, worker)
+    assert.equal(detail.normal, preview.normal)
+    assert.equal(detail.extra, preview.extra)
+    assert.equal(detail.holiday, preview.holidayHours)
+    assert.equal(detail.estimatedPay, 1104.22)
+    assert.equal(money(detail.estimatedPay), money(preview.pay.total))
+    assert.equal(detail.pendingHours, 3)
+    const [[{ valor_nuevo }]] = await db.execute(
+      `SELECT b.valor_nuevo FROM bitacora b JOIN detalle_reporte d ON d.id_detalle = b.id_registro_afectado
+        WHERE d.id_reporte = ? AND b.entidad = 'detalle_reporte' AND b.campo = 'clasificacion'`,
+      [created.reportId],
+    )
+    assert.deepEqual(JSON.parse(valor_nuevo).estimateRates, config)
+  })
+
+  await t.test('conserva los importes previos y distingue un cero anterior sin cálculo', async () => {
+    const [legacy] = await db.execute(
+      `INSERT INTO reporte (tipo, periodo_inicio, periodo_fin, fecha_generacion, id_generado_por)
+       VALUES ('ASISTENCIA_PUNTUALIDAD', ?, ?, '2024-02-01 12:00:00', ?)`,
+      [period.from, period.to, hr],
+    )
+    const [detail] = await db.execute(
+      'INSERT INTO detalle_reporte (id_reporte, id_empleado, horas_normal) VALUES (?, ?, 8.25)', [legacy.insertId, worker],
+    )
+    await db.execute(
+      `INSERT INTO bitacora (fecha_hora, accion, entidad, id_registro_afectado, campo, valor_nuevo, id_usuario)
+       VALUES ('2024-02-01 12:00:00', 'ALTA', 'detalle_reporte', ?, 'clasificacion', '{"pendingHours":1}', ?)`,
+      [detail.insertId, hr],
+    )
+    const result = await request(`/${legacy.insertId}`)
+    assert.equal(result.data.report.details[0].estimatedPay, null)
+    assert.equal(result.data.report.details[0].normal, 8.25)
+    assert.deepEqual((await request(`/${singleId}`)).data.report, savedSnapshot)
+    const [[stored]] = await db.execute('SELECT importe_estimado FROM detalle_reporte WHERE id_detalle = ?', [detail.insertId])
+    assert.equal(stored.importe_estimado, 0)
+  })
+
+  await t.test('el permiso de reportes permite consultar las horas y el de nómina permite ver el importe', async () => {
+    await db.execute(
+      `DELETE FROM rol_permiso WHERE id_rol = (SELECT id_rol FROM empleado WHERE id_empleado = ?)
+        AND id_permiso = (SELECT id_permiso FROM permiso WHERE codigo = 'NOMINA_CONSULTAR')`, [hr],
+    )
+    const result = await request(`/${singleId}`)
+    assert.equal(result.status, 200)
+    assert.equal(result.data.report.canViewEstimatedPay, false)
+    assert.equal(result.data.report.details[0].normal, 8.25)
+    assert.equal(result.data.report.details[0].estimatedPay, null)
+    assert.equal((await request(`/${singleId}`, { actor: admin })).data.report.details[0].estimatedPay, 122.4)
   })
 })

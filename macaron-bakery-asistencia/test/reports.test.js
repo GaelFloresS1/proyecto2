@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { before, test } from 'node:test'
-import { buildReport, getState, patch, ROLES } from '../src/store.js'
+import { buildReport, getState, money, patch, ROLES, roundEstimatedPay } from '../src/store.js'
 
 const period = { from: '2026-11-01', to: '2026-11-30' }
 const employee = { id: 2, role: ROLES.EMPLEADO, salary: 19200 }
@@ -92,4 +92,15 @@ test('cuenta las solicitudes de la API por empleado y dentro del período', () =
   assert.equal(block.authorizedAbsences, 2)
   assert.equal(block.pending, 1)
   assert.equal(block.rejected, 1)
+})
+
+test('redondea el importe a los centavos que muestra la vista del reporte', () => {
+  const [block] = buildReport({
+    ...period, userId: String(employee.id), attendances: [
+      { ...regularDay, normalHours: '0.01', extraHours: '0.00' },
+    ],
+  })
+  assert.equal(roundEstimatedPay(block.pay.total), 1)
+  assert.equal(roundEstimatedPay(1.005), 1.01)
+  assert.equal(money(roundEstimatedPay(1.005)), money(1.005))
 })

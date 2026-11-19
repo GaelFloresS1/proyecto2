@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Button, Card, Modal } from '../components'
-import { formatDateTime, loadAttendanceReport, loadAttendanceReports } from '../store'
+import { formatDateTime, loadAttendanceReport, loadAttendanceReports, money } from '../store'
 
 export default function HrReportHistory() {
   const [page, setPage] = useState(1)
@@ -66,6 +66,7 @@ function SavedReport({ id, onClose }) {
   }, [id])
 
   const report = result?.ok ? result.report : null
+  const missingEstimate = report?.canViewEstimatedPay ? 'Sin cálculo guardado' : 'Sin permiso de consulta'
   return (
     <Modal title={`Reporte de asistencia #${id}`} onClose={onClose}>
       {!result && <p role="status">Cargando reporte…</p>}
@@ -74,7 +75,7 @@ function SavedReport({ id, onClose }) {
         <>
           <p>{report.periodStart} a {report.periodEnd}</p>
           <p className="text-sm text-cocoa-soft">{formatDateTime(report.generatedAt)} · {report.generatedBy}</p>
-          <p className="my-3 text-sm text-cocoa-soft">El reporte guarda las horas clasificadas al momento de generarse. Importe estimado no aplicable.</p>
+          <p className="my-3 text-sm text-cocoa-soft">El importe estimado es orientativo para Recursos Humanos y usa las horas clasificadas al generar el reporte.</p>
           <div className="max-h-[55vh] space-y-3 overflow-y-auto">
             {report.details.map(detail => (
               <section key={detail.employeeId} className="rounded-2xl bg-white p-3">
@@ -85,6 +86,7 @@ function SavedReport({ id, onClose }) {
                   <Metric label="Horas normales clasificadas" value={`${detail.normal} h`} />
                   <Metric label="Horas extra clasificadas" value={`${detail.extra} h`} />
                   <Metric label="Horas festivas clasificadas" value={`${detail.holiday} h`} />
+                  <Metric label="Importe estimado" value={detail.estimatedPay == null ? missingEstimate : money(detail.estimatedPay)} />
                   <Metric label="Jornadas con horas por revisar" value={detail.pendingHours} />
                   <Metric label="Faltas autorizadas" value={detail.authorizedAbsences} />
                   <Metric label="Faltas no autorizadas validadas" value={detail.unauthorizedAbsences} />

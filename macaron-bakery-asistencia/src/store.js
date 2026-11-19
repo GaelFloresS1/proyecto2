@@ -2,6 +2,10 @@
  * Estado compartido del prototipo. Empleados, sesión y turnos provienen
  * de MariaDB. Las funciones locales conservan su persistencia.
  */
+import { DEFAULT_REPORT_RATES, estimateReportPay, hourlyRate as reportHourlyRate, roundEstimatedPay } from '../backend/src/services/reportEstimate.js'
+
+export { roundEstimatedPay }
+
 const KEY = 'macaron-bakery-nomina-v1'
 
 export const ROLES = {
@@ -284,9 +288,7 @@ function createInitialState() {
     config: {
       company: 'Macaron & Bakery',
       graceMinutes: 10,
-      extraHourMultiplier: 1.5,
-      holidayHourMultiplier: 2,
-      monthlyHours: 192,
+      ...DEFAULT_REPORT_RATES,
     },
     attendances: [],
     auditLog: [],
@@ -766,7 +768,8 @@ export async function loadAdjustableAttendance({ from, to, userId }) {
 }
 
 export function saveAttendanceReport({ from, to, userId }) {
-  const body = { from, to }
+  const { monthlyHours, extraHourMultiplier, holidayHourMultiplier } = state?.config ?? DEFAULT_REPORT_RATES
+  const body = { from, to, rates: { monthlyHours, extraHourMultiplier, holidayHourMultiplier } }
   if (userId) body.employeeId = Number(userId)
   return adminRequest('reports', 'reportes', '', { method: 'POST', body: JSON.stringify(body) })
 }
@@ -798,24 +801,11 @@ export function computeDay(record) {
 }
 
 export function hourlyRate(user) {
-  return user.salary / state.config.monthlyHours
+  return reportHourlyRate(user.salary, state.config.monthlyHours)
 }
 
 export function estimatePay(calc, user) {
-  if (user.salary === null) return null
-  const hour = hourlyRate(user)
-
-  const normalPay = calc.normal * hour
-  const extraPay = calc.extra * hour * state.config.extraHourMultiplier
-  const holidayPay = calc.holidayHours * hour * state.config.holidayHourMultiplier
-
-  return {
-    hour,
-    normalPay,
-    extraPay,
-    holidayPay,
-    total: normalPay + extraPay + holidayPay,
-  }
+  return estimateReportPay(calc, user.salary, state.config)
 }
 
 export function buildReport({
@@ -876,23 +866,18 @@ export function buildReport({
       (r) => r.status === 'rechazada',
     ).length ?? null
 
-    const pay = estimatePay(
-      { normal, extra, holidayHours },
-      user,
-    )
+    const hours = { normal: round2(normal), extra: round2(extra), holidayHours: round2(holidayHours) }
 
     return {
       user,
       records,
       lateCount,
-      extra: round2(extra),
-      holidayHours: round2(holidayHours),
-      normal: round2(normal),
+      ...hours,
       workedDays,
       authorizedAbsences,
       pending,
       rejected,
-      pay,
+      pay: estimatePay(hours, user),
     }
   })
 }
