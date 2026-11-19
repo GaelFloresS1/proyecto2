@@ -88,10 +88,10 @@ async function attendanceRequest(path, options = {}) {
 
   const data = await response.json().catch(() => ({}))
 
-  if (!response.ok || data.ok === false) {
+  if (!response.ok || data?.ok !== true) {
     return {
       ok: false,
-      message: data.message || `Error de asistencia (${response.status}).`,
+      message: data?.message || `Error de asistencia (${response.status}).`,
     }
   }
 
@@ -172,14 +172,16 @@ function dbTimeToHM(value) {
 }
 
 // Convierte un registro de MySQL al formato utilizado por React.
-function mapAttendanceRow(row, user) {
+function mapAttendanceRow(row, userId = row.id_empleado) {
   const entry = row.entrada_local ?? row.fecha_hora_entrada
   const exit = row.salida_local ?? row.fecha_hora_salida
 
   return {
     id: row.id_asistencia,
-    userId: user.id,
+    userId,
     date: row.fecha_local ?? dbDateToISO(row.fecha),
+    entryAt: row.entrada_local ?? '',
+    exitAt: row.salida_local ?? '',
     entryDate: dbDateToISO(entry),
     exitDate: dbDateToISO(exit),
     checkIn: dbTimeToHM(entry),
@@ -385,7 +387,7 @@ export async function loadMyAttendance() {
   const result = await attendanceRequest('/history')
   if (!result.ok) return result
 
-  const records = (result.attendances || []).map(row => mapAttendanceRow(row, user))
+  const records = (result.attendances || []).map(row => mapAttendanceRow(row, user.id))
   if (version === sessionVersion && revision === attendanceRevision) {
     patch(draft => ({
       ...draft,
@@ -485,7 +487,7 @@ async function registerAttendance(userId, path) {
   const result = await attendanceRequest(path, { method: 'POST' })
   if (!result.ok) return result
 
-  const record = mapAttendanceRow(result.attendance, user)
+  const record = mapAttendanceRow(result.attendance, user.id)
   if (version === sessionVersion) {
     attendanceRevision += 1
     patch(draft => ({
@@ -897,77 +899,21 @@ export function saveConfig(partial, actorId) {
   })
 }
 
-export function adjustAttendance({
-  attendanceId,
-  extraHoursOverride,
-  holidayHoursOverride,
-  notes,
-  actorId,
-  checkIn,
-  checkOut,
-}) {
-  const rec = state.attendances.find(
-    (a) => a.id === attendanceId,
-  )
+export async function loadAdjustableAttendance({ from, to, userId }) {
+  const query = new URLSearchParams({ from, to })
+  if (userId) query.set('employeeId', userId)
+  const result = await attendanceRequest(`/adjustments?${query}`)
+  if (!result.ok) return result
+  return { ok: true, records: result.attendances.map(row => mapAttendanceRow(row)) }
+}
 
-  if (!rec) {
-    return {
-      ok: false,
-      message: 'No se encontró el registro de asistencia.',
-    }
-  }
-
-  if (rec.source === 'sistema') {
-    return { ok: false, message: 'El ajuste de marcajes de MariaDB queda pendiente de un flujo autorizado.' }
-  }
-
-  patch((draft) => {
-    const target = draft.attendances.find(
-      (a) => a.id === attendanceId,
-    )
-
-    const previous = JSON.stringify({
-      extra: target.extraHoursOverride,
-      holiday: target.holidayHoursOverride,
-      in: target.checkIn,
-      out: target.checkOut,
-    })
-
-    if (checkIn != null) target.checkIn = checkIn
-    if (checkOut != null) target.checkOut = checkOut
-
-    target.extraHoursOverride =
-      extraHoursOverride === '' || extraHoursOverride == null
-        ? null
-        : Number(extraHoursOverride)
-
-    target.holidayHoursOverride =
-      holidayHoursOverride === '' || holidayHoursOverride == null
-        ? null
-        : Number(holidayHoursOverride)
-
-    target.notes = notes ?? target.notes
-
-    addAudit(draft, {
-      userId: actorId,
-      action: 'Modificar reporte / horas extras o festivas',
-      entity: attendanceId,
-      previousValue: previous,
-      newValue: JSON.stringify({
-        extra: target.extraHoursOverride,
-        holiday: target.holidayHoursOverride,
-        in: target.checkIn,
-        out: target.checkOut,
-      }),
-    })
-
-    return draft
+export async function adjustAttendance({ attendanceId, entryAt, exitAt, reason }) {
+  const result = await attendanceRequest(`/adjustments/${encodeURIComponent(attendanceId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ entryAt, exitAt, reason }),
   })
-
-  return {
-    ok: true,
-    message: 'Ajuste guardado en el reporte y en la bitácora.',
-  }
+  if (!result.ok) return result
+  return { ...result, attendance: mapAttendanceRow(result.attendance) }
 }
 
 export function computeDay(record) {
@@ -1004,13 +950,14 @@ export function buildReport({
   userId,
   from,
   to,
+  attendances = state.attendances,
 }) {
   const users = state.users.filter(
 (u) => (userId ? u.id === Number(userId) : u.role !== ROLES.ADMIN),
   )
 
   return users.map((user) => {
-    const records = state.attendances.filter(
+    const records = attendances.filter(
       (a) =>
         a.userId === user.id &&
         a.date >= from &&

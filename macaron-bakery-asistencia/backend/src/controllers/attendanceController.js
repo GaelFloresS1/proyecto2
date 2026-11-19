@@ -1,10 +1,12 @@
 import pool from '../config/database.js'
-import { addDays, attendanceState, closeCalculation, entryContext, withLateness } from '../services/attendanceCalculation.js'
+import { hasPermission } from '../middleware/requirePermission.js'
+import { addDays, adjustmentContext, attendanceState, closeCalculation, entryContext, withLateness } from '../services/attendanceCalculation.js'
 
 const defaultTolerance = 10 // Valor predeterminado de config_nomina y del prototipo.
+export const attendanceAdjustmentPermission = 'REPORTE_MODIFICAR'
 
 const attendanceSelect = `
-  SELECT a.id_asistencia, a.fecha, a.fecha_hora_entrada, a.fecha_hora_salida,
+  SELECT a.id_asistencia, a.id_empleado, a.fecha, a.fecha_hora_entrada, a.fecha_hora_salida,
          a.retardo, a.horas_normales, a.horas_extra, a.horas_festiva,
          CAST(a.fecha AS CHAR) AS fecha_local,
          CAST(a.fecha_hora_entrada AS CHAR) AS entrada_local,
@@ -15,9 +17,9 @@ const attendanceSelect = `
              AND b.campo = 'contexto_jornada'
            ORDER BY b.id_bitacora DESC LIMIT 1) AS entry_audit,
          (SELECT b.valor_nuevo FROM bitacora b
-           WHERE b.id_usuario = a.id_empleado AND b.entidad = 'asistencia'
-             AND b.id_registro_afectado = a.id_asistencia AND b.accion = 'CAMBIO'
+           WHERE b.entidad = 'asistencia' AND b.id_registro_afectado = a.id_asistencia
              AND b.campo = 'calculo_jornada'
+             AND (b.accion = 'CORRECCION' OR (b.accion = 'CAMBIO' AND b.id_usuario = a.id_empleado))
            ORDER BY b.id_bitacora DESC LIMIT 1) AS result_audit
     FROM asistencia a`
 
@@ -56,12 +58,13 @@ export function publicAttendance({ entry, result, ...row }, clock) {
     horas_extra: decimalHours(row.horas_extra),
     horas_festiva: decimalHours(row.horas_festiva),
   }
+  const lateMinutes = result && Object.hasOwn(result, 'lateMinutes') ? result.lateMinutes : entry?.lateMinutes
   return {
     ...row,
     ...hours,
     estado,
     estado_calculo: calculationStatus(estado, entry, result, Object.values(hours)),
-    minutos_retardo: entry?.lateMinutes ?? null,
+    minutos_retardo: lateMinutes ?? null,
     minutos_tolerancia: entry?.tolerance ?? null,
   }
 }
@@ -115,6 +118,47 @@ class AttendanceError extends Error {
   }
 }
 
+function positiveId(value) {
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) return null
+  const id = Number(value)
+  return id > 0 && id <= 2147483647 ? id : null
+}
+
+function validDate(value) {
+  if (typeof value !== 'string' || !/^[1-9]\d{3}-\d{2}-\d{2}$/.test(value)) return false
+  const date = new Date(`${value}T00:00:00Z`)
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value
+}
+
+function localDateTime(value) {
+  if (typeof value !== 'string') return null
+  const parts = /^([1-9]\d{3}-\d{2}-\d{2})[T ](([01]\d|2[0-3]):[0-5]\d)(:[0-5]\d)?$/.exec(value)
+  return parts && parts[0] === value && validDate(parts[1]) ? `${parts[1]} ${parts[2]}${parts[4] ?? ':00'}` : null
+}
+
+export async function listAdjustableAttendance(req, res, next) {
+  try {
+    const { from, to, employeeId } = req.query
+    if (!validDate(from) || !validDate(to) || from > to) {
+      throw new AttendanceError(400, 'Selecciona un rango de fechas válido.')
+    }
+    const id = employeeId === undefined ? null : positiveId(employeeId)
+    if (employeeId !== undefined && id === null) throw new AttendanceError(400, 'Selecciona un empleado válido.')
+
+    const clock = await databaseClock(pool)
+    const [rows] = await pool.execute(
+      `${attendanceSelect}
+        WHERE a.fecha BETWEEN ? AND ?${id ? ' AND a.id_empleado = ?' : ''}
+        ORDER BY a.fecha DESC, a.id_asistencia DESC`,
+      id ? [from, to, id] : [from, to],
+    )
+    res.json({ ok: true, attendances: rows.map(row => publicAttendance(decodeAttendance(row), clock)) })
+  } catch (error) {
+    if (error instanceof AttendanceError) return res.status(error.status).json({ ok: false, message: error.message })
+    next(error)
+  }
+}
+
 function recordAttendance(status, changeAttendance) {
   return async (req, res, next) => {
     let connection
@@ -154,12 +198,24 @@ function recordAttendance(status, changeAttendance) {
   }
 }
 
-async function logAttendance(connection, employeeId, id, clock, action, field, data) {
+async function logAttendance(connection, actorId, id, clock, action, field, data, previous = null, reason = null) {
+  const before = previous && JSON.stringify(previous)
+  const after = JSON.stringify({ ...data, version: 1 })
+  if (before?.length > 255 || after.length > 255) throw new Error('El contexto de asistencia supera el espacio disponible en bitácora.')
   await connection.execute(
-    `INSERT INTO bitacora (fecha_hora, accion, entidad, id_registro_afectado, campo, valor_nuevo, id_usuario)
-     VALUES (?, ?, 'asistencia', ?, ?, ?, ?)`,
-    [clock.local, action, id, field, JSON.stringify({ ...data, version: 1 }), employeeId],
+    `INSERT INTO bitacora (fecha_hora, accion, entidad, id_registro_afectado, campo,
+                          valor_anterior, valor_nuevo, motivo, id_usuario)
+     VALUES (?, ?, 'asistencia', ?, ?, ?, ?, ?, ?)`,
+    [clock.local, action, id, field, before, after, reason, actorId],
   )
+}
+
+async function hasHolidayDuring(connection, entryAt, exitAt) {
+  const entryDate = entryAt.slice(0, 10)
+  const exitDate = exitAt.slice(0, 10)
+  const lastDateWorked = exitDate > entryDate && exitAt.endsWith(' 00:00:00') ? addDays(exitDate, -1) : exitDate
+  const [[holiday]] = await connection.execute('SELECT 1 FROM festivo WHERE fecha BETWEEN ? AND ? LIMIT 1', [entryDate, lastDateWorked])
+  return Boolean(holiday)
 }
 
 export const clockIn = recordAttendance(201, async ({ connection, employeeId, employee, clock, rows }) => {
@@ -214,15 +270,7 @@ export const clockOut = recordAttendance(200, async ({ connection, employeeId, c
     throw new AttendanceError(409, 'La salida debe ser posterior a la entrada. Intenta de nuevo.')
   }
 
-  let hasHoliday = false
-  if (row.entry?.status === 'pendiente') {
-    const entryDate = row.entrada_local.slice(0, 10)
-    const exitDate = clock.local.slice(0, 10)
-    const lastDateWorked = exitDate > entryDate && clock.local.endsWith(' 00:00:00') ? addDays(exitDate, -1) : exitDate
-    const [[holiday]] = await connection.execute('SELECT 1 FROM festivo WHERE fecha BETWEEN ? AND ? LIMIT 1', [entryDate, lastDateWorked])
-    hasHoliday = Boolean(holiday)
-  }
-
+  const hasHoliday = row.entry?.status === 'pendiente' && await hasHolidayDuring(connection, row.entrada_local, clock.local)
   const result = closeCalculation(row.entry, clock, hasHoliday)
   const [update] = await connection.execute(
     `UPDATE asistencia
@@ -250,4 +298,136 @@ function closureMessage(status) {
   if (status === 'calculado') return 'Salida registrada y horas guardadas.'
   if (status === 'descanso_pendiente') return 'Salida registrada. Las horas quedan pendientes porque el descanso programado de la jornada es inválido o no está disponible.'
   return 'Salida registrada. Las horas quedan pendientes de clasificación.'
+}
+
+function adjustmentInput(body) {
+  const fields = ['entryAt', 'exitAt', 'reason']
+  if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !fields.includes(key))) {
+    throw new AttendanceError(400, 'Envía únicamente la entrada, la salida y el motivo.')
+  }
+  const entryAt = localDateTime(body.entryAt)
+  const exitAt = localDateTime(body.exitAt)
+  const reason = typeof body.reason === 'string' ? body.reason.trim() : ''
+  if (!entryAt || !exitAt) throw new AttendanceError(400, 'Escribe una fecha y hora válidas para la entrada y la salida.')
+  if (exitAt <= entryAt) throw new AttendanceError(400, 'La salida debe ser posterior a la entrada. Para un turno nocturno, indica la fecha del día siguiente.')
+  if (!reason || [...reason].length > 255) throw new AttendanceError(400, 'Escribe un motivo de entre 1 y 255 caracteres.')
+  return { entryAt, exitAt, reason }
+}
+
+function auditValues(row) {
+  return {
+    fecha: row.fecha_local,
+    entrada: row.entrada_local,
+    salida: row.salida_local,
+    retardo: row.retardo,
+    normales: row.horas_normales,
+    extra: row.horas_extra,
+    festivas: row.horas_festiva,
+    status: row.estado_calculo,
+    lateMinutes: row.minutos_retardo,
+  }
+}
+
+export async function adjustAttendance(req, res, next) {
+  let connection
+  let transaction = false
+  try {
+    const id = positiveId(req.params.id)
+    if (id === null) throw new AttendanceError(400, 'El identificador de asistencia no es válido.')
+    const { entryAt, exitAt, reason } = adjustmentInput(req.body)
+    const actorId = req.session.employee.id
+    connection = await pool.getConnection()
+    const [[target]] = await connection.execute('SELECT id_empleado FROM asistencia WHERE id_asistencia = ?', [id])
+    if (!target) throw new AttendanceError(404, 'No se encontró la asistencia.')
+
+    await connection.beginTransaction()
+    transaction = true
+    // Usa el mismo bloqueo por empleado que los marcajes y un orden fijo para ambos usuarios.
+    await connection.execute(
+      'SELECT id_empleado FROM empleado WHERE id_empleado IN (?, ?) ORDER BY id_empleado FOR UPDATE',
+      [actorId, target.id_empleado],
+    )
+    if (!(await hasPermission(actorId, attendanceAdjustmentPermission, connection))) {
+      throw new AttendanceError(403, 'No tienes permiso para ajustar asistencias.')
+    }
+    const [[found]] = await connection.execute(`${attendanceSelect} WHERE a.id_asistencia = ? FOR UPDATE`, [id])
+    if (!found || found.id_empleado !== target.id_empleado) {
+      throw new AttendanceError(409, 'El registro cambió. Recarga el reporte antes de guardar.')
+    }
+
+    const row = decodeAttendance(found)
+    const clock = await databaseClock(connection)
+    const [[times]] = await connection.execute(
+      'SELECT UNIX_TIMESTAMP(?) AS entry_epoch, UNIX_TIMESTAMP(?) AS exit_epoch',
+      [entryAt, exitAt],
+    )
+    const enteredAt = Number(times.entry_epoch)
+    const exitedAt = Number(times.exit_epoch)
+    const elapsedSeconds = exitedAt - enteredAt
+    if (!Number.isInteger(enteredAt) || !Number.isInteger(exitedAt) || enteredAt <= 0 ||
+        elapsedSeconds <= 0 || elapsedSeconds >= 24 * 60 * 60) {
+      throw new AttendanceError(400, 'La jornada debe tener una duración positiva menor de 24 horas.')
+    }
+
+    const entryClock = { local: entryAt, epoch: enteredAt }
+    const { date, context } = adjustmentContext(row.entry, entryClock)
+    if (context?.status === 'pendiente' && exitAt.slice(0, 10) > context.closeThrough) {
+      throw new AttendanceError(400, 'La salida queda fuera de la fecha de cierre del turno registrado.')
+    }
+    const [[duplicate]] = await connection.execute(
+      'SELECT id_asistencia FROM asistencia WHERE id_empleado = ? AND fecha = ? AND id_asistencia <> ? LIMIT 1',
+      [row.id_empleado, date, id],
+    )
+    if (duplicate) throw new AttendanceError(409, 'Ya existe una asistencia para ese empleado y fecha.')
+
+    const holiday = context?.status === 'pendiente' && await hasHolidayDuring(connection, entryAt, exitAt)
+    const computed = closeCalculation(context, { local: exitAt, epoch: exitedAt }, holiday)
+    const status = !context && row.entry?.status === 'pendiente' ? 'fecha_sin_contexto' : computed.status
+    const lateMinutes = context?.startsAt && Number.isInteger(context.tolerance) && context.tolerance >= 0
+      ? withLateness(context, entryClock, context.tolerance).lateMinutes
+      : null
+    const updated = {
+      fecha_local: date,
+      entrada_local: entryAt,
+      salida_local: exitAt,
+      retardo: lateMinutes > 0 ? 1 : 0,
+      horas_normales: computed.normal ?? 0,
+      horas_extra: computed.extra ?? 0,
+      horas_festiva: computed.holiday ?? 0,
+      estado_calculo: status,
+      minutos_retardo: lateMinutes,
+    }
+    await connection.execute(
+      `UPDATE asistencia
+          SET fecha = ?, fecha_hora_entrada = ?, fecha_hora_salida = ?, retardo = ?,
+              horas_normales = ?, horas_extra = ?, horas_festiva = ?
+        WHERE id_asistencia = ?`,
+      [date, entryAt, exitAt, updated.retardo, updated.horas_normales, updated.horas_extra, updated.horas_festiva, id],
+    )
+    await logAttendance(
+      connection, actorId, id, clock, 'CORRECCION', 'calculo_jornada',
+      { ...auditValues(updated), elapsedSeconds }, auditValues(publicAttendance(row, clock)), reason,
+    )
+    const [[saved]] = await connection.execute(`${attendanceSelect} WHERE a.id_asistencia = ?`, [id])
+    const attendance = publicAttendance(decodeAttendance(saved), clock)
+    await connection.commit()
+    transaction = false
+    res.json({
+      ok: true,
+      attendance,
+      message: status === 'calculado' ? 'Ajuste guardado y horas recalculadas.' : 'Ajuste guardado. Las horas requieren revisión.',
+    })
+  } catch (error) {
+    if (transaction) await connection.rollback()
+    if (error instanceof AttendanceError) return res.status(error.status).json({ ok: false, message: error.message })
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ ok: false, message: 'Ya existe una asistencia para ese empleado y fecha.' })
+    }
+    if (error.code === 'ER_LOCK_DEADLOCK' || error.code === 'ER_LOCK_WAIT_TIMEOUT') {
+      return res.status(409).json({ ok: false, message: 'Otro cambio está en curso. Recarga el reporte e intenta de nuevo.' })
+    }
+    next(error)
+  } finally {
+    connection?.release()
+  }
 }

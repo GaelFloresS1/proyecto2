@@ -73,6 +73,21 @@ export function withLateness(context, clock, tolerance) {
   return { ...context, tolerance, lateMinutes: Math.max(0, Math.ceil(overTolerance / 60)) }
 }
 
+export function adjustmentContext(entry, clock) {
+  const date = clock.local.slice(0, 10)
+  if (!entry) return { date, context: null }
+
+  // El contexto solo acredita el horario de la jornada original. Una
+  // madrugada anterior al fin programado sigue siendo parte de ese turno.
+  const start = entry.startsAt ? civilSeconds(entry.startsAt) : NaN
+  const end = start + entry.scheduledSeconds + entry.rest
+  const sameOvernight = entry.status === 'pendiente' && entry.closeThrough !== entry.date &&
+    date === entry.closeThrough && civilSeconds(clock.local) < end
+  if (date !== entry.date && !sameOvernight) return { date, context: null }
+
+  return { date: entry.date, context: { ...entry, enteredAt: clock.epoch } }
+}
+
 export function attendanceState(row, clock) {
   if (!row.entrada_local || !Number.isFinite(civilSeconds(row.entrada_local))) return 'incompleto'
   const context = row.entry

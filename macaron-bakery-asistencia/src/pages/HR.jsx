@@ -2,7 +2,7 @@
  * Módulo de Recursos Humanos (el Administrador hereda estas pantallas).
  * Bandeja de permisos/faltas, calendario de festivos, reportes, Excel y bitácora.
  */
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import * as XLSX from 'xlsx'
 import { Badge, Button, Card, Field, inputClass, Modal, PageHeader, Toast } from '../components'
 import {
@@ -13,6 +13,7 @@ import {
   getState,
   getUser,
   holidayName,
+  loadAdjustableAttendance,
   localISO,
   money,
   removeHoliday,
@@ -154,16 +155,34 @@ export function HrHolidays() {
 }
 
 export function HrReports() {
-  const actor = getUser()
   const data = getState()
   const initial = monthRange()
   const [from, setFrom] = useState(initial.from)
   const [to, setTo] = useState(initial.to)
   const [userId, setUserId] = useState('')
   const [edit, setEdit] = useState(null)
+  const [editError, setEditError] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [attendance, setAttendance] = useState(null)
   const [toast, setToast] = useState(null)
 
-  const report = buildReport({ userId: userId || null, from, to })
+  const rangeKey = `${from}/${to}/${userId}`
+  const validRange = from && to && from <= to
+  const current = attendance?.key === rangeKey ? attendance : null
+  const report = current?.ok ? buildReport({ userId, from, to, attendances: current.records }) : []
+
+  useEffect(() => {
+    if (!validRange) return
+    let active = true
+    loadAdjustableAttendance({ from, to, userId })
+      .then(result => {
+        if (active) setAttendance({ ...result, key: rangeKey })
+      })
+      .catch(() => {
+        if (active) setAttendance({ key: rangeKey, ok: false, message: 'No se pudieron cargar las asistencias.' })
+      })
+    return () => { active = false }
+  }, [from, to, userId, validRange, rangeKey])
 
   function exportExcel() {
     const rows = report.map((block) => ({
@@ -185,11 +204,40 @@ export function HrReports() {
     setToast({ type: 'ok', message: 'Se descargó el archivo .xlsx con el mismo filtro del reporte en pantalla.' })
   }
 
-  function saveEdit(event) {
+  function openEdit(record) {
+    setEditError('')
+    setEdit({
+      attendanceId: record.id,
+      entryAt: record.entryAt.replace(' ', 'T'),
+      exitAt: record.exitAt.replace(' ', 'T'),
+      reason: '',
+    })
+  }
+
+  async function saveEdit(event) {
     event.preventDefault()
-    const result = adjustAttendance({ ...edit, actorId: actor.id })
-    setToast({ type: result.ok ? 'ok' : 'error', message: result.message })
-    if (result.ok) setEdit(null)
+    if (saving) return
+    setSaving(true)
+    setEditError('')
+    try {
+      const result = await adjustAttendance(edit)
+      if (!result.ok) {
+        setEditError(result.message)
+        return
+      }
+      const corrected = result.attendance
+      setAttendance(latest => latest?.ok ? {
+        ...latest,
+        records: latest.records.map(record => record.id === corrected.id ? corrected : record)
+          .sort((a, b) => b.date.localeCompare(a.date) || b.id - a.id),
+      } : latest)
+      setToast({ type: corrected.calculationStatus === 'calculado' ? 'ok' : 'warn', message: result.message })
+      setEdit(null)
+    } catch {
+      setEditError('No se pudo completar el ajuste. Recarga el reporte para comprobar el registro.')
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
@@ -198,7 +246,7 @@ export function HrReports() {
         kicker="Reportes"
         title="Asistencia, puntualidad y apoyo a nómina"
         subtitle="El pago del período se estima a partir de las horas trabajadas y el sueldo mensual contratado."
-        actions={<Button onClick={exportExcel}>Exportar Excel (.xlsx)</Button>}
+        actions={<Button onClick={exportExcel} disabled={!current?.ok}>Exportar Excel (.xlsx)</Button>}
       />
       <Card className="mb-5 grid gap-3 md:grid-cols-4">
         <Field label="Desde">
@@ -219,6 +267,10 @@ export function HrReports() {
           Extra ×{data.config.extraHourMultiplier} · Festivo ×{data.config.holidayHourMultiplier}
         </div>
       </Card>
+
+      {!validRange ? <p role="alert" className="text-sm text-berry">Selecciona un rango de fechas válido.</p> : null}
+      {validRange && !current ? <p role="status" className="text-sm text-cocoa-soft">Cargando asistencias…</p> : null}
+      {current?.ok === false ? <p role="alert" className="text-sm text-berry">{current.message}</p> : null}
 
       <div className="space-y-5">
         {report.map((block) => (
@@ -252,31 +304,26 @@ export function HrReports() {
                 </thead>
                 <tbody>
                   {block.records.map((rec) => {
-                    const calc = computeDay(rec, block.user)
+                    const calc = computeDay(rec)
+                    const pending = rec.status !== 'cerrado' || !['calculado', 'historico'].includes(rec.calculationStatus)
                     return (
                       <tr key={rec.id} className="border-t border-cocoa/10">
                         <td className="py-2">
                           {rec.date}
                           {calc.holiday ? <span className="ml-2 text-xs text-berry">{holidayName(rec.date)}</span> : null}
-                          {rec.late ? <span className="ml-2 text-xs text-amber-700">retardo {rec.lateMinutes}’</span> : null}
+                          {rec.late ? <span className="ml-2 text-xs text-amber-700">retardo{rec.lateMinutes == null ? '' : ` ${rec.lateMinutes}’`}</span> : null}
+                          {pending ? <span className="ml-2 text-xs text-amber-700">{rec.status === 'abierto' ? 'Jornada abierta' : 'Horas por revisar'}</span> : null}
                         </td>
                         <td>{rec.checkIn || '—'}</td>
                         <td>{rec.checkOut || '—'}</td>
-                        <td>{calc.normal}</td>
-                        <td>{calc.extra}</td>
-                        <td>{calc.holidayHours}</td>
+                        <td>{pending ? '—' : calc.normal}</td>
+                        <td>{pending ? '—' : calc.extra}</td>
+                        <td>{pending ? '—' : calc.holidayHours}</td>
                         <td className="text-right">
                           <button
                             type="button"
                             className="text-berry hover:underline"
-                            onClick={() => setEdit({
-                              attendanceId: rec.id,
-                              extraHoursOverride: rec.extraHoursOverride ?? calc.extra,
-                              holidayHoursOverride: rec.holidayHoursOverride ?? calc.holidayHours,
-                              checkIn: rec.checkIn || '',
-                              checkOut: rec.checkOut || '',
-                              notes: rec.notes || '',
-                            })}
+                            onClick={() => openEdit(rec)}
                           >
                             Ajustar
                           </button>
@@ -292,27 +339,22 @@ export function HrReports() {
       </div>
 
       {edit ? (
-        <Modal title="Modificar reporte / horas extras o festivas" onClose={() => setEdit(null)}>
+        <Modal title="Ajustar asistencia" onClose={() => { if (!saving) setEdit(null) }}>
           <form className="space-y-3" onSubmit={saveEdit}>
-            <p className="text-sm text-cocoa-soft">El empleado no edita marcajes. RH sí puede corregir inconsistencias; el valor anterior queda en bitácora.</p>
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Entrada">
-                <input className={inputClass} value={edit.checkIn} onChange={(e) => setEdit({ ...edit, checkIn: e.target.value })} />
+            <p className="text-sm text-cocoa-soft">La bitácora conserva los valores anteriores y el motivo. Para una salida de madrugada, selecciona la fecha del día siguiente.</p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label="Fecha y hora de entrada">
+                <input type="datetime-local" step="1" className={inputClass} value={edit.entryAt} onChange={(e) => setEdit({ ...edit, entryAt: e.target.value })} required disabled={saving} />
               </Field>
-              <Field label="Salida">
-                <input className={inputClass} value={edit.checkOut} onChange={(e) => setEdit({ ...edit, checkOut: e.target.value })} />
-              </Field>
-              <Field label="Horas extras">
-                <input type="number" step="0.25" className={inputClass} value={edit.extraHoursOverride} onChange={(e) => setEdit({ ...edit, extraHoursOverride: e.target.value })} />
-              </Field>
-              <Field label="Horas festivas">
-                <input type="number" step="0.25" className={inputClass} value={edit.holidayHoursOverride} onChange={(e) => setEdit({ ...edit, holidayHoursOverride: e.target.value })} />
+              <Field label="Fecha y hora de salida">
+                <input type="datetime-local" step="1" className={inputClass} value={edit.exitAt} onChange={(e) => setEdit({ ...edit, exitAt: e.target.value })} required disabled={saving} />
               </Field>
             </div>
-            <Field label="Nota">
-              <textarea className={inputClass} rows={2} value={edit.notes} onChange={(e) => setEdit({ ...edit, notes: e.target.value })} />
+            <Field label="Motivo del ajuste">
+              <textarea className={inputClass} rows={2} maxLength={255} value={edit.reason} onChange={(e) => setEdit({ ...edit, reason: e.target.value })} required disabled={saving} />
             </Field>
-            <Button type="submit" className="w-full">Guardar ajuste</Button>
+            {editError ? <p role="alert" className="text-sm text-berry">{editError}</p> : null}
+            <Button type="submit" className="w-full" disabled={saving}>{saving ? 'Guardando…' : 'Guardar ajuste'}</Button>
           </form>
         </Modal>
       ) : null}
